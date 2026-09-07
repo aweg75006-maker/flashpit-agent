@@ -18,6 +18,7 @@ from agents._sdk.location import current_location_from_meta
 from agents._sdk.provenance import attach
 from runtime.session_constraints import (NO_QUEUE_RE, NO_SPICY_RE,
                                          SPICY_MARKS)
+from runtime.decision_log import DecisionRationale, DecisionStep
 from agents._sdk.timewindow import (
     clock_minutes, dining_window, fmt_clock, parse_event_time)
 from .providers import build_place_provider
@@ -607,6 +608,31 @@ class NearbyAgent(BaseAgent):
                 speech=f"附近暂时没找到{label}，换个说法或扩大范围再试试？",
                 follow_up="可以说『附近的火锅』或『评分高的川菜馆』")
 
+        # ── I3 决策可解释：收集本轮关键决策步骤，最后挂到卡片 _rationale ──
+        # 只记「关键决策点」，不记中间计算（plan §5.4：每 Agent ≤5 步）。
+        rationale = DecisionRationale(
+            trace_id=(meta or {}).get("trace_id", ""),
+            intent="nearby.search",
+        )
+        # 检索口径：rating_min/price/open_now/sort 由 provider 内部做客户端过滤，
+        # 把它们也记进「检索」这一步的 criteria，让「为什么」面板说清候选集怎么来的。
+        search_criteria = ["keyword"]
+        if rating_min:
+            search_criteria.append("rating_min")
+        if price_min or price_max:
+            search_criteria.append("price")
+        if open_now:
+            search_criteria.append("open_now")
+        if sort:
+            search_criteria.append("sort")
+        rationale.add(DecisionStep(
+            step_id="nearby.search",
+            decision=f"按「{label}」检索周边候选",
+            options_considered=len(results),
+            options_remaining=len(results),
+            criteria=search_criteria,
+        ))
+
         # E1：按**入座时刻**筛营业中（这一条不是近似，是真实数据：business.opentime_today）。
         # 「明确闭店才剔，未知保留」与既有 open_now 同纪律；全被剔时不硬凑——保留原列表
         # 并如实说那个点大多不营业。
@@ -616,7 +642,18 @@ class NearbyAgent(BaseAgent):
             open_at_seat = [p for p in results
                             if is_open_now(p.open_today, seat_min) is not False]
             if open_at_seat:
+                # I3：明确闭店才剔（同「未知保留」纪律），把被剔的记进决策轨迹。
+                closed = [p for p in results if p not in open_at_seat]
                 results = open_at_seat
+                rationale.add(DecisionStep(
+                    step_id="nearby.filter_open",
+                    decision="按入座时刻筛除明确已闭店的",
+                    options_considered=len(closed) + len(open_at_seat),
+                    options_remaining=len(open_at_seat),
+                    criteria=["open_now"],
+                    eliminated=[{"id": p.id, "name": p.name, "reason": "该时段已闭店"}
+                                for p in closed],
+                ))
             else:
                 window_notes.append("不过那个点附近这些店大多不营业，可能得换个时间或换个地方")
 
@@ -627,6 +664,15 @@ class NearbyAgent(BaseAgent):
                 0 if any(t in (p.tags or "") for t in _AMBIENCE_TAGS) else 1,
                 -(p.rating or 0)))
             taste_notes.append("您要安静些的——地图没有安静度数据，已按环境类标签和评分优先")
+            # I3：近似重排——地图没有「安静度」字段，conf 调低如实标注（非真实属性）。
+            rationale.add(DecisionStep(
+                step_id="nearby.rerank_ambience",
+                decision="按环境类标签与评分优先（地图无安静度数据，属近似）",
+                options_considered=len(results),
+                options_remaining=len(results),
+                criteria=["ambience", "rating"],
+                confidence=0.6,
+            ))
         # E2：行动不便 → 停车便利近似重排。**先于口味降权**跑：用户当轮点名的负偏好
         # 是更强的信号，得由它说最后一句话（否则停车排序会把降权项拉回前面）。
         access: dict = {}
@@ -637,6 +683,15 @@ class NearbyAgent(BaseAgent):
             if parking and any(s["count"] for s in parking):
                 taste_notes.append(
                     f"{reason}——地图没有无障碍/台阶数据，已按周边停车便利度排序")
+                # I3：停车便利度是「无障碍」的近似代理，conf 调低如实标注。
+                rationale.add(DecisionStep(
+                    step_id="nearby.rerank_parking",
+                    decision="按周边停车便利度排序（地图无无障碍数据，属近似）",
+                    options_considered=len(results),
+                    options_remaining=len(results),
+                    criteria=["parking"],
+                    confidence=0.6,
+                ))
             else:
                 taste_notes.append(f"{reason}——地图没有无障碍数据，这条我按不上")
         # G6：负偏好软降权（忌辣/店名级差评 → 结果后移），话术只报**真实生效**的项
@@ -645,6 +700,15 @@ class NearbyAgent(BaseAgent):
             results, moved = self._taste_rerank(results, taste)
             if moved:
                 taste_notes.append("不合口味的已排后")
+                # I3：负偏好是排序信号不是过滤器（记错了也只是排后），conf 略调低。
+                rationale.add(DecisionStep(
+                    step_id="nearby.rerank_taste",
+                    decision="不合口味的排后（口味偏好软降权，不删除）",
+                    options_considered=len(results),
+                    options_remaining=len(results),
+                    criteria=["taste"],
+                    confidence=0.7,
+                ))
             caution = self._taste_caution(taste, cuisine or keyword)
             if caution:
                 taste_notes.append(caution)
@@ -728,6 +792,13 @@ class NearbyAgent(BaseAgent):
             extra_data["_fallback"] = True
         card = attach({"type": "place_list", "category": category, "keyword": label,
                        "items": items, "display_priority": 1}, self.place)
+        # I3：把本轮决策轨迹挂到卡片 _rationale。final_reason 复用已生成的口味/近似
+        # 话术；没有任何重排触发时给一句朴素的总结，不空挂（attach_to 空轨迹会跳过）。
+        if taste_notes:
+            rationale.final_reason = "；".join(taste_notes)
+        else:
+            rationale.final_reason = f"按「{label}」检索并排序得到推荐"
+        rationale.attach_to(card)
         # center 来源随数据落盘（观测/下游可辨）：slot=用户指定位置 / vehicle=车辆
         # 位置 / none=指名门店按名检索。none 时话术不得出现「附近/为您找到」的
         # 就近暗示——按名找到就说按名找到。

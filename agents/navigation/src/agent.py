@@ -22,6 +22,7 @@ from agents._sdk.landmark import (
 from agents._sdk.timewindow import fmt_clock, parse_clock_time
 from .providers import build_poi_provider
 from .providers.base import GeoPoint, POI
+from runtime.decision_log import DecisionRationale, DecisionStep
 
 logger = logging.getLogger("agent.navigation")
 
@@ -512,6 +513,30 @@ class NavigationAgent(BaseAgent):
                   "lat": r.lat, "lng": r.lng} for r in results]
         card = attach({"type": "poi_list", "keyword": resolved_keyword, "items": items},
                       self.poi)
+        # I3 决策可解释：POI 搜索的可解释点 = 关键词检索 + 是否按评分从高到低排序。
+        # 在 card 构造后立即挂载，使下面两条 return（自动导航 / 列表推荐）都带得上轨迹。
+        rationale = DecisionRationale(
+            trace_id=(meta or {}).get("trace_id", ""),
+            intent="navigation.search_poi",
+        )
+        rationale.add(DecisionStep(
+            step_id="navigation.search_poi",
+            decision=f"按「{resolved_keyword}」检索地点",
+            options_considered=len(results),
+            options_remaining=len(results),
+            criteria=["keyword"] + (["rating"] if prefer_highest else []),
+        ))
+        if prefer_highest:
+            rationale.add(DecisionStep(
+                step_id="navigation.sort_rating",
+                decision="按评分从高到低排序",
+                options_considered=len(results),
+                options_remaining=len(results),
+                criteria=["rating"],
+            ))
+        rationale.final_reason = (f"按「{resolved_keyword}」检索"
+                                  + ("并按评分排序" if prefer_highest else "") + "得到结果")
+        rationale.attach_to(card)
 
         if results and not is_category and self._is_navigation_phrase(raw_text):
             first = results[0]
@@ -1464,6 +1489,30 @@ class NavigationAgent(BaseAgent):
         card = attach({"type": "route_plan", "origin": origin_label, "destination": name,
                        "waypoints": [], "distance_km": distance_km,
                        "duration_min": duration_min, **deadline_extra}, self.poi)
+        # I3 决策可解释：路线选择的可解释点 = 应用了什么路线偏好（含记忆偏好回退）。
+        # 高德 get_route 返回单条最优路线，没有多候选过滤，故不记「淘汰」，只记「策略」。
+        rationale = DecisionRationale(
+            trace_id=(meta or {}).get("trace_id", ""),
+            intent="navigation.navigate_to",
+        )
+        rationale.add(DecisionStep(
+            step_id="navigation.route_strategy",
+            decision=strategy_note or "未指定路线偏好，按默认路线规划",
+            options_considered=1,
+            options_remaining=1,
+            criteria=["route_pref"] if strategy else ["default"],
+            confidence=0.9,
+        ))
+        if distance_km:
+            rationale.add(DecisionStep(
+                step_id="navigation.route_plan",
+                decision=f"规划 {origin_label} → {name} 路线（约 {distance_km} 公里）",
+                options_considered=1,
+                options_remaining=1,
+                criteria=["distance", "duration"],
+            ))
+        rationale.final_reason = strategy_note or f"从{origin_label}到{name}全程约{distance_km}公里"
+        rationale.attach_to(card)
         return self._stamp_route_session(AgentResult(
             speech=speech, ui_card=card,
             data={"destination": name, "lat": lat, "lng": lng, **deadline_extra},

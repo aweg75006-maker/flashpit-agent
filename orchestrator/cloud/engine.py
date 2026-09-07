@@ -27,6 +27,7 @@ from .clients import set_llm_pin
 from . import candidate_query
 from . import slot_shape
 from runtime import session_facts
+from runtime.decision_log import DecisionRationale, DecisionStep
 from runtime.execution_claim import execution_claim
 from runtime.clause_split import split_clauses
 from runtime.polarity import is_negated_directive
@@ -623,6 +624,9 @@ class PlannerEngine:
             # Planner/Agent 给出的 goal/reason 即使看起来更像指令也没有这项权威。
             plan.safety_origin_text = text
             ctx.safety_origin_text = text
+            # I3 决策可解释：从最终计划组装 Planner 层决策轨迹（确定性、可追溯）。
+            # 记录「编排做了哪些确定性决策」，不记录「LLM 为什么这么想」（黑盒，plan §5.4 不做）。
+            plan.planner_rationale = self._build_planner_rationale(plan)
 
             # R4.4 D6-1：hands-free 语音源 + LLM 判非受话 → 静默拒识（route_hints 兜底的 steps
             # 一并作废）。显式输入（push-to-talk/文本/候选选择）无 input_source，永不拒识。必须在
@@ -908,6 +912,7 @@ class PlannerEngine:
                         user_id=ctx.user_id,
                         exchange_id=ctx.request_id)
                 final = await self.aggregator.compose(text or plan.raw_text, results)
+                self._attach_planner_rationale(final, plan)
                 self._append_pending_hint(final, held_pending)
                 self._append_abandoned_hint(final, ctx.abandoned_pending_label)
                 # M2 P2：会话级情绪信号随 final 透传给 HMI 选 TTS 情感参数（不入记忆）
@@ -931,6 +936,7 @@ class PlannerEngine:
                         step, ctx)
                     final = await self.aggregator.compose(
                         text or plan.raw_text, [uncertain_sr])
+                    self._attach_planner_rationale(final, plan)
                     yield {"kind": "final", **final}
                     return
                 # 只流了话术：话已经说了一半，重跑会播两遍。
@@ -1046,6 +1052,7 @@ class PlannerEngine:
                                  summary="合并各步结果生成回复", status="start")
         final = await self.aggregator.compose(
             text or plan.raw_text, results, thinking=complex_task)
+        self._attach_planner_rationale(final, plan)
         self._append_pending_hint(final, held_pending)
         self._append_abandoned_hint(final, ctx.abandoned_pending_label)
         if getattr(plan, "emotion", ""):
@@ -1924,6 +1931,17 @@ class PlannerEngine:
             for step in plan.steps:
                 step.meta = {**step.meta, **alert_meta}
 
+        # I3 决策可解释：上一轮决策轨迹下发。**广播给所有步**（同 safety_alert 口径
+        # 而非 scope 门控）——它不是敏感数据，且「为什么」追问最常落到闲聊兜底，
+        # 按 scope 门控会漏掉最该消费它的那一个。chitchat 读 `focus_last_rationale`
+        # 注入 system 转述；其余 Agent 忽略即可（多一个 meta 键无副作用）。
+        rationale = getattr(focus, "last_rationale", None) or {}
+        if isinstance(rationale, dict) and rationale.get("steps"):
+            rationale_meta = {"focus_last_rationale": json.dumps(
+                rationale, ensure_ascii=False)}
+            for step in plan.steps:
+                step.meta = {**step.meta, **rationale_meta}
+
         if focus.destination_lat is None or focus.destination_lng is None:
             return
         meta = {
@@ -1934,6 +1952,61 @@ class PlannerEngine:
         for step in plan.steps:
             if "location" in (step.context_scopes or []):
                 step.meta = {**step.meta, **meta}
+
+    @staticmethod
+    def _build_planner_rationale(plan: Plan) -> dict:
+        """从最终计划组装 Planner 层决策轨迹（I3，确定性、可追溯）。
+
+        只记编排**确定性**做了什么的决策点：最终选中了哪些 Agent/意图（按序）、
+        是否兜底到闲聊、是否命中确定性路由规则。**不记「LLM 为什么这么想」**——
+        那是黑盒，plan §5.4 明确留 Phase 2（JSON mode 结构化输出约束）。
+
+        返回 DecisionRationale 的 dict 形态（与 Agent 层 card._rationale 同结构，
+        HMI 的 RationalePanel 可复用渲染）；空计划（无 steps）返回空 dict。
+        """
+        if not plan.steps:
+            return {}
+        intents = [f"{s.agent_id}:{s.intent}" for s in plan.steps if s.intent]
+        if not intents:
+            return {}
+        steps = [DecisionStep(
+            step_id="planner.plan",
+            decision="系统规划调用：" + " → ".join(intents),
+            criteria=["intent", "registry"],
+        )]
+        # route_hint 是确定性路由规则命中（RouteHintEngine），可追溯到「为什么落这个 Agent」。
+        if plan.hint_effect in ("fill", "fill_over_clarify", "replace", "append"):
+            steps.append(DecisionStep(
+                step_id="planner.route_hint",
+                decision="命中确定性路由规则，直接确定目标 Agent",
+                criteria=["route_hint"],
+            ))
+        # 兜底：无可用能力时落到闲聊（plan.steps 全为 chitchat 且 intent 是闲聊/兜底）。
+        if all((s.agent_id == "chitchat") for s in plan.steps):
+            steps.append(DecisionStep(
+                step_id="planner.fallback",
+                decision="无匹配领域能力，兜底到闲聊应答",
+                criteria=["fallback"],
+            ))
+        rationale = DecisionRationale(
+            intent="planner.plan", steps=steps,
+            final_reason="由规划器按能力目录与确定性路由规则编排",
+        )
+        return rationale.to_dict()
+
+    @staticmethod
+    def _attach_planner_rationale(final: dict, plan: Plan) -> None:
+        """把 Planner 层决策轨迹挂到最终 ui_card 的 `_planner_rationale`（I3）。
+
+        与 Agent 层 `_rationale`（「为什么这么选」，nearby/navigation）分开：
+        这里回答「为什么做这些步骤」（Planner 编排）。HMI 的 RationalePanel 分层展开。
+        无 ui_card / 无 planner_rationale / card_group 场景时不做（单卡与主卡才挂）。
+        """
+        rationale = getattr(plan, "planner_rationale", None)
+        card = final.get("ui_card")
+        if not rationale or not isinstance(card, dict) or card.get("type") == "card_group":
+            return
+        card["_planner_rationale"] = rationale
 
     def _restore(self, state: SessionState, *,
                  inject_confirmed: bool) -> tuple[Plan | None, list[StepResult]]:

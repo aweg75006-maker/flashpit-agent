@@ -7,7 +7,7 @@ import type {
   SearchResultCard, NewsBriefCard, ResearchReportCard, SportsScoresCard, SportsScorersCard,
   RoutePlanCard, ChargingRouteCard, TripItineraryCard, PoiListCard, PoiDetailCard,
   PlaceListCard, PlaceDetailCard, IntentChoiceCard,
-  ReminderListCard, ReminderCard, SceneCard, SceneListCard, Provenance,
+  ReminderListCard, ReminderCard, SceneCard, SceneListCard, Provenance, DecisionRationale, DecisionStep,
   CardButton, MerchantCheckoutCard, PaymentQrCard, McpOrderCard, McpResultCard,
   ManualCard, ManualImage,
 } from '../types'
@@ -210,6 +210,69 @@ function ProvBadge({ prov }: { prov?: Provenance }) {
       {prov.vendor}{t ? ` · ${t}` : ''}
     </span>
   )
+}
+
+// 决策轨迹面板（I3）：点「为什么」展开，逐步展示 DecisionStep。
+// 分两层：Planner 层（「系统执行步骤」，`_planner_rationale`）+ Agent 层（「为什么这么选」，
+// `_rationale`）。每步 = 序号 + 决策描述 + 计数变化 + 排除项 + 近似标注。
+// confidence < 1 表示近似/软重排（地图无对应字段），如实标「近似」不假装精确。
+function RationaleSteps({ steps, startIndex = 0 }: { steps: DecisionStep[]; startIndex?: number }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      {steps.map((s, i) => (
+        <div key={s.step_id || i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+          <span style={{ width: 20, height: 20, borderRadius: '50%', flexShrink: 0, display: 'grid', placeItems: 'center', background: 'var(--au-line)', border: '1px solid var(--au-line-2)', fontFamily: 'var(--au-font-mono)', fontSize: 11, fontWeight: 700, color: 'var(--au-text-2)' }}>{startIndex + i + 1}</span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 12.5, color: 'var(--au-text)' }}>{s.decision}</div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center', marginTop: 3 }}>
+              {(s.options_considered > 0 || s.options_remaining > 0) && (
+                <span style={{ fontSize: 11, color: 'var(--au-text-3)' }}>{s.options_considered} → {s.options_remaining} 家</span>
+              )}
+              {(s.confidence ?? 1) < 1 && (
+                <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 6px', borderRadius: 999, background: 'rgba(148,163,184,0.16)', color: 'var(--au-text-2)' }}>近似</span>
+              )}
+            </div>
+            {(s.eliminated?.length ?? 0) > 0 && (
+              <div style={{ marginTop: 4, fontSize: 11, color: 'var(--au-text-3)' }}>
+                排除：{s.eliminated!.map(e => `${e.name || e.id}（${e.reason}）`).join('、')}
+              </div>
+            )}
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function RationalePanel({ rationale, plannerRationale }: { rationale?: DecisionRationale; plannerRationale?: DecisionRationale }) {
+  const plannerSteps = plannerRationale?.steps?.length ? plannerRationale.steps : []
+  const agentSteps = rationale?.steps?.length ? rationale.steps : []
+  if (!plannerSteps.length && !agentSteps.length) return null
+  return (
+    <div style={{ padding: '4px 16px 14px', borderTop: '1px solid var(--au-line)' }}>
+      {plannerSteps.length > 0 && (
+        <div style={{ marginBottom: agentSteps.length ? 12 : 0 }}>
+          <div style={{ fontSize: 11, color: 'var(--au-text-3)', fontWeight: 600, marginBottom: 8 }}>系统执行步骤</div>
+          <RationaleSteps steps={plannerSteps} />
+        </div>
+      )}
+      {agentSteps.length > 0 && (
+        <div>
+          {plannerSteps.length > 0 && <div style={{ fontSize: 11, color: 'var(--au-text-3)', fontWeight: 600, marginBottom: 8 }}>为什么这么选</div>}
+          <RationaleSteps steps={agentSteps} startIndex={plannerSteps.length} />
+        </div>
+      )}
+      {rationale?.final_reason && (
+        <div style={{ marginTop: 10, padding: '8px 10px', borderRadius: 8, background: 'var(--au-line)', fontSize: 11.5, color: 'var(--au-text-2)' }}>{rationale.final_reason}</div>
+      )}
+    </div>
+  )
+}
+
+// 是否有任一层的决策轨迹（Agent 层 _rationale 或 Planner 层 _planner_rationale）——
+// 「为什么」按钮据此显隐。
+function hasRationale(card: { _rationale?: DecisionRationale; _planner_rationale?: DecisionRationale }) {
+  return (card._rationale?.steps?.length ?? 0) > 0 || (card._planner_rationale?.steps?.length ?? 0) > 0
 }
 
 function ManualCardView({ card }: { card: ManualCard }) {
@@ -1084,13 +1147,26 @@ function RoutePlanCardView({ card, onAction }: { card: RoutePlanCard; onAction?:
   const dur = card.duration_min
     ? `${Math.floor(card.duration_min / 60) ? `${Math.floor(card.duration_min / 60)}小时` : ''}${card.duration_min % 60 ? `${card.duration_min % 60}分钟` : ''}`
     : ''
+  // I3：决策轨迹展开态——有 _rationale 才渲染「为什么」按钮与面板。
+  const [showWhy, setShowWhy] = useState(false)
   return (
     <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
       <div style={{ padding: '15px 16px 12px' }}>
         <AIBadge label="AI · 路线规划" />
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7, fontSize: 14.5, fontWeight: 600, opacity: card.cancelled ? 0.55 : 1, textDecoration: card.cancelled ? 'line-through' : 'none' }}><Icon name="route-map" size={17} color="var(--au-text)" />{card.cancelled ? '导航已结束' : card.estimate ? '距离估算' : '规划路线'}</span>
-          {(card.distance_km || dur) && <span className="au-num" style={{ fontSize: 12, color: 'var(--au-text-2)' }}>{dur}{card.distance_km ? `${dur ? ' · ' : ''}${card.distance_km}km` : ''}</span>}
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+            {hasRationale(card) && (
+              <button
+                type="button"
+                onClick={() => setShowWhy(v => !v)}
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 9px', borderRadius: 999, fontSize: 11, fontWeight: 600, fontFamily: 'inherit', cursor: 'pointer', color: 'var(--au-primary)', background: 'transparent', border: '1px solid var(--au-primary)' }}
+              >
+                <Icon name="info" size={13} color="var(--au-primary)" />为什么
+              </button>
+            )}
+            {(card.distance_km || dur) && <span className="au-num" style={{ fontSize: 12, color: 'var(--au-text-2)' }}>{dur}{card.distance_km ? `${dur ? ' · ' : ''}${card.distance_km}km` : ''}</span>}
+          </span>
         </div>
       </div>
       <CardHR />
@@ -1115,6 +1191,7 @@ function RoutePlanCardView({ card, onAction }: { card: RoutePlanCard; onAction?:
           )
         })}
       </div>
+      {showWhy && <RationalePanel rationale={card._rationale} plannerRationale={card._planner_rationale} />}
       <div style={{ padding: '0 16px 14px' }}>
         {/* 按钮回发的必须是**可直接执行的自然语言**（I-031：「解释定位原理」那颗按钮回发后
             被判没听清）。estimate 卡上它才是真按钮——只算不导之后「那就导过去」是下一步；
@@ -1281,13 +1358,26 @@ function TripItineraryCardView({ card, onAction }:
 function PoiListCardView({ card }: { card: PoiListCard }) {
   const isChoice = card.purpose === 'dest_choice' || card.purpose === 'waypoint_choice'
   const title = isChoice ? (card.title || '请选择') : `附近${card.keyword || '地点'}`
+  // I3：决策轨迹展开态——有 _rationale 才渲染「为什么」按钮与面板。
+  const [showWhy, setShowWhy] = useState(false)
   return (
     <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
       <div style={{ padding: '15px 16px 12px' }}>
         <AIBadge label="AI · 位置搜索" />
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7, fontSize: 14.5, fontWeight: 600 }}><Icon name="location" size={17} color="var(--au-text)" />{title}</span>
-          <span style={{ fontSize: 11, color: 'var(--au-text-3)' }}>已更新 · 共 {card.items.length} 个</span>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+            {hasRationale(card) && (
+              <button
+                type="button"
+                onClick={() => setShowWhy(v => !v)}
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 9px', borderRadius: 999, fontSize: 11, fontWeight: 600, fontFamily: 'inherit', cursor: 'pointer', color: 'var(--au-primary)', background: 'transparent', border: '1px solid var(--au-primary)' }}
+              >
+                <Icon name="info" size={13} color="var(--au-primary)" />为什么
+              </button>
+            )}
+            <span style={{ fontSize: 11, color: 'var(--au-text-3)' }}>已更新 · 共 {card.items.length} 个</span>
+          </span>
         </div>
       </div>
       <CardHR />
@@ -1307,6 +1397,7 @@ function PoiListCardView({ card }: { card: PoiListCard }) {
           {i < card.items.length - 1 && <div style={{ height: 1, background: 'var(--au-line)', margin: '0 16px' }} />}
         </div>
       ))}
+      {showWhy && <RationalePanel rationale={card._rationale} plannerRationale={card._planner_rationale} />}
       <div style={{ padding: '11px 16px 13px', borderTop: '1px solid var(--au-line)', display: 'flex', alignItems: 'center', gap: 8 }}>
         <Icon name="voice-input" size={14} color="var(--au-text-3)" />
         <span style={{ fontSize: 11, color: 'var(--au-text-3)' }}>说「<span style={{ color: 'var(--au-text-2)' }}>导航去第 2 个</span>」或「<span style={{ color: 'var(--au-text-2)' }}>最近的{card.keyword || '地点'}</span>」</span>
@@ -1505,6 +1596,8 @@ function IntentChoiceCardView({ card, onAction }: { card: IntentChoiceCard; onAc
 
 function PlaceListCardView({ card, onAction }: { card: PlaceListCard; onAction?: (t: string) => void }) {
   const title = `附近${card.keyword || card.category || '地点'}`
+  // I3：决策轨迹展开态——有 _rationale 才渲染「为什么」按钮与面板。
+  const [showWhy, setShowWhy] = useState(false)
   return (
     <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
       <div style={{ padding: '15px 16px 12px' }}>
@@ -1514,7 +1607,18 @@ function PlaceListCardView({ card, onAction }: { card: PlaceListCard; onAction?:
         </div>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7, fontSize: 14.5, fontWeight: 600 }}><Icon name="location" size={17} color="var(--au-text)" />{title}</span>
-          <span style={{ fontSize: 11, color: 'var(--au-text-3)' }}>共 {card.items.length} 家</span>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+            {hasRationale(card) && (
+              <button
+                type="button"
+                onClick={() => setShowWhy(v => !v)}
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 9px', borderRadius: 999, fontSize: 11, fontWeight: 600, fontFamily: 'inherit', cursor: 'pointer', color: 'var(--au-primary)', background: 'transparent', border: '1px solid var(--au-primary)' }}
+              >
+                <Icon name="info" size={13} color="var(--au-primary)" />为什么
+              </button>
+            )}
+            <span style={{ fontSize: 11, color: 'var(--au-text-3)' }}>共 {card.items.length} 家</span>
+          </span>
         </div>
       </div>
       <CardHR />
@@ -1559,6 +1663,7 @@ function PlaceListCardView({ card, onAction }: { card: PlaceListCard; onAction?:
           {i < card.items.length - 1 && <div style={{ height: 1, background: 'var(--au-line)', margin: '0 16px' }} />}
         </div>
       ))}
+      {showWhy && <RationalePanel rationale={card._rationale} plannerRationale={card._planner_rationale} />}
       <div style={{ padding: '11px 16px 13px', borderTop: '1px solid var(--au-line)', display: 'flex', alignItems: 'center', gap: 8 }}>
         <Icon name="voice-input" size={14} color="var(--au-text-3)" />
         <span style={{ fontSize: 11, color: 'var(--au-text-3)' }}>说「<span style={{ color: 'var(--au-text-2)' }}>看第 1 个详情</span>」或「<span style={{ color: 'var(--au-text-2)' }}>导航去第 2 个</span>」</span>

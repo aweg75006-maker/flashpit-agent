@@ -69,6 +69,26 @@ export type Provenance = {
   data_time_label?: string
 }
 
+// 决策可解释层（I3）：决策推理轨迹——卡片可带 `_rationale`，HMI 点「为什么」展开。
+// 后端挂在 ui_card._rationale 字段（ui_card 是自由 Struct，零 proto 改动）。
+export type DecisionStep = {
+  step_id: string
+  decision: string          // 自然语言描述，面板直接展示
+  options_considered: number
+  options_remaining: number
+  criteria: string[]
+  chosen?: string[]
+  eliminated?: Array<{ id: string; name?: string; reason: string }>
+  confidence?: number       // 0~1；<1 表示近似/软重排，面板如实标注「近似」
+}
+
+export type DecisionRationale = {
+  trace_id?: string
+  intent?: string
+  steps: DecisionStep[]
+  final_reason?: string
+}
+
 export type UiCard =
   | CardGroup
   | WeatherCard
@@ -339,6 +359,8 @@ export type IntentChoiceCard = {
 // 路线规划卡：出发地 → 途经点（餐厅等）→ 目的地（导航确认途经点后）
 export type RoutePlanCard = {
   type: 'route_plan'
+  _rationale?: DecisionRationale   // I3 Agent 层决策轨迹：路线策略选择
+  _planner_rationale?: DecisionRationale  // I3 Planner 层：为什么做这些步骤
   // estimate=true 表示这一轮**只算不导**（navigation.estimate，QA 卡 Q8 / I-016）。
   // 卡片标题与按钮据此改写——「卡片类型必须与本轮真实动作一致」（I-022 同族）：
   // 一张写着「已规划好路线」的卡配一个没有发生的导航，用户没法分辨这两件事。
@@ -608,6 +630,8 @@ export type NewsDigestCard = {
 
 export type PoiListCard = {
   type: 'poi_list'
+  _rationale?: DecisionRationale   // I3 Agent 层决策轨迹：搜索关键词与排序
+  _planner_rationale?: DecisionRationale  // I3 Planner 层：为什么做这些步骤
   keyword?: string
   // 'dest_choice' = 充电目的地候选（回填目的地槽位）；'waypoint_choice' = 顺路停靠候选（落途经点）
   purpose?: string
@@ -637,6 +661,8 @@ export type PoiDetailCard = {
 export type PlaceListCard = {
   type: 'place_list'
   _prov?: Provenance
+  _rationale?: DecisionRationale      // I3 Agent 层决策轨迹：为什么这么选
+  _planner_rationale?: DecisionRationale  // I3 Planner 层：为什么做这些步骤
   category?: string            // 餐饮/酒店/景点/影院…（卡头与文案用）
   keyword?: string
   items: Array<{

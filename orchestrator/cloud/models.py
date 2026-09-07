@@ -148,6 +148,12 @@ class Plan:
     # 而本字段从最初请求起保持不变并随 pending_plan 持久化。LLM goal/reason 无权写它。
     # 放在末尾以保持既有 Plan 位置参数契约不变。
     safety_origin_text: str = ""
+    # I3 决策可解释：Planner 层决策轨迹（确定性、可追溯）。engine 在规划完成后
+    # 从「最终选中了哪些意图（按序）+ 是否兜底 + 是否命中 route_hint」组装成
+    # DecisionRationale dict，随 final 挂到 ui_card._planner_rationale。
+    # 与 Agent 层 card._rationale（「为什么这么选」）分开：这里回答「为什么做这些步骤」。
+    # **不碰 LLM 黑盒**（不记录「LLM 为什么这么想」，那是 plan §5.4 留 Phase 2 的难点）。
+    planner_rationale: dict = field(default_factory=dict)
 
 
 @dataclass

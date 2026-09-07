@@ -307,6 +307,12 @@ class Focus:
     # 「我今天说了不吃辣」——冲突时前景赢（§4.3 那条判据的载体，写下一年才有）。
     # 同 safety_alert 的粘性：普通轮不得把它抹掉，**只有用户改口才覆盖**。
     session_constraints: dict = field(default_factory=dict)
+    # I3 决策可解释：上一轮卡片挂的决策轨迹 `_rationale`（nearby/navigation 产出，
+    # 存 card._rationale 的 dict 原样：{intent, steps, final_reason}）。
+    # 用户追问「为什么选这几家 / 为什么不走高速」时，Planner/chitchat 据此回答。
+    # 与 active_route/safety_alert 同款粘性：普通轮不得抹掉，只有新一轮产生新轨迹才替换；
+    # 不进 prompt 整段渲染（_render_focus 只抽 decision 短句），下发走 _apply_focus_meta。
+    last_rationale: dict = field(default_factory=dict)
     # **本轮 scratch，不跨轮**（保存前由 `update_focus` 复位）：这一轮显式终止了活动路线
     # （保留键 `_route_session_end`，QA I-017）。
     # ⚠ 存在的理由是**接力比清除更强**：粘性接力的条件是 `not focus.active_route`，
@@ -326,7 +332,7 @@ class Focus:
                     or self.last_choice_purpose or self.last_choices
                     or self.candidate_sets
                     or self.last_places or self.active_route or self.safety_alert
-                    or self.session_constraints
+                    or self.session_constraints or self.last_rationale
                     or self.route_ended
                     or self.destination_lat is not None
                     or self.destination_lng is not None)
@@ -565,6 +571,16 @@ def _render_focus(focus, drop_sticky_places: bool = False) -> str:
             # 这里偏 8 小时，模型转述出去就是一句错的约束。
             seg += f"，须{clock_hhmm(ab)}前到达"
         parts.append(seg)
+    # I3 决策可解释：上一轮决策轨迹。只抽「decision」短句（自然语言、≤5 步），
+    # 不整段塞（同 last_places 纪律，防诱导模型编）。用户追问「为什么」时 Planner
+    # 据此判断这是对上一轮结果的追问，并路由到闲聊/相关 Agent 转述。
+    rationale = getattr(focus, "last_rationale", None) or {}
+    if isinstance(rationale, dict) and rationale.get("steps"):
+        decs = [str(s.get("decision") or "").strip()
+                for s in rationale["steps"][:5] if isinstance(s, dict)]
+        decs = [d for d in decs if d]
+        if decs:
+            parts.append("上一轮决策=" + "；".join(decs))
     if not parts:
         return ""
     return ("当前对话焦点（用于指代消解，仅在用户话术含指代/省略式追问时参考）：\n"
@@ -1271,6 +1287,15 @@ def extract_focus(plan, results) -> "Focus | None":
                 pass
         if not focus.last_agent_id:
             focus.last_agent_id, focus.last_intent = step.agent_id, step.intent
+        # I3 决策可解释：从本轮卡片抽决策轨迹（M1/M2 由 nearby/navigation 挂到
+        # card._rationale）。只认「有 steps 的 dict」，空轨迹不进焦点。粘性接力
+        # 在 update_focus 里做——这里每轮重建，普通轮会把它抹空。
+        result = by_id.get(step.id)
+        card = getattr(result, "ui_card", None) or {}
+        rationale = (card or {}).get("_rationale") if isinstance(card, dict) else None
+        if isinstance(rationale, dict) and isinstance(rationale.get("steps"), list) \
+                and rationale["steps"]:
+            focus.last_rationale = rationale
 
     # 跨轮门店锚定：只认 `nearby.search`，且只留三个标量。
     # **按 results 的 `source_intent` 取，不按传进来的 plan 找步骤**——
@@ -1504,6 +1529,11 @@ class ContextManager:
                 if previous is not None and getattr(previous, "session_constraints", None):
                     focus.session_constraints = merge_constraints(
                         dict(previous.session_constraints), focus.session_constraints)
+                # I3：决策轨迹同款粘性——普通轮（这一句没产生新卡片）必须原样保住，
+                # 否则「为什么」追问只能隔着上上轮回答（同 last_places 那族教训）。
+                if previous is not None and not focus.last_rationale \
+                        and getattr(previous, "last_rationale", None):
+                    focus.last_rationale = dict(previous.last_rationale)
                 if previous is not None and not focus.last_city \
                         and focus.last_intent not in WEATHER_CONTEXT_INTENTS \
                         and getattr(previous, "last_city", ""):

@@ -168,6 +168,48 @@ def _active_alert(meta: dict) -> dict:
     return alert
 
 
+def _rationale_context(meta: dict) -> str:
+    """编排下发的上一轮决策轨迹（`meta.focus_last_rationale`，I3）。解析失败当没有。
+
+    它是**系统持有的真实决策轨迹**（nearby/navigation 产出并随焦点跨轮下发），
+    不是模型能自己编的。用户追问「为什么/为什么不选/为什么是这几个」时据此转述，
+    其余话题忽略——同 `_active_alert` 的「解析失败当没有」纪律。"""
+    raw = (meta or {}).get("focus_last_rationale")
+    if not raw:
+        return ""
+    try:
+        rationale = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return ""
+    if not isinstance(rationale, dict):
+        return ""
+    steps = rationale.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return ""
+    lines = []
+    for s in steps[:5]:
+        if not isinstance(s, dict):
+            continue
+        dec = str(s.get("decision") or "").strip()
+        if not dec:
+            continue
+        elim = s.get("eliminated") or []
+        tail = ""
+        if isinstance(elim, list) and elim:
+            names = "、".join(str(e.get("name") or "")
+                             for e in elim[:3] if isinstance(e, dict))
+            if names:
+                tail = f"（排除了：{names}）"
+        lines.append(f"- {dec}{tail}")
+    if not lines:
+        return ""
+    final = str(rationale.get("final_reason") or "").strip()
+    tail = f"\n总结：{final}" if final else ""
+    return ("上一轮系统为你推荐/规划时的实际决策过程（仅当用户追问「为什么/为什么不选/"
+            "为什么是这几个」时据此如实转述，不要编造理由；其他话题忽略这一段）：\n"
+            + "\n".join(lines) + tail)
+
+
 def _system(meta: dict) -> str:
     name = (meta or {}).get("assistant_name") or "小舟"
     # M4 P4：声纹识别出的说话人称呼。**没有它「你知道我是谁」只能靠语义召回碰运气**——
@@ -176,6 +218,8 @@ def _system(meta: dict) -> str:
     who = (meta or {}).get("occupant_name", "").strip()
     _, hint = _length(meta)
     now = shanghai_now()
+    # I3：上一轮决策轨迹（编排经 focus 下发）。算一次，结尾拼进 system。
+    rationale_block = _rationale_context(meta)
     # 锚点带星期与时刻：纯钟点问句已被 _clock_answer 确定性拦下，这里供「该吃午饭了吗」
     # 这类时间相对话题参考——没有时刻锚模型会编一个像真的（badcase 2026-07-15）。
     return (
@@ -219,6 +263,8 @@ def _system(meta: dict) -> str:
            "无论用户问什么、或明确表示不想被提醒，都不得表示可以继续危险驾驶、"
            "不得撤回或弱化停车/休息建议；可以不再重复啰嗦，但立场不改。"
            if _active_alert(meta) else "")
+        # I3：上一轮决策轨迹作为**事实通道**注入（有才拼，无则不影响既有行为）。
+        + (f"\n\n{rationale_block}" if rationale_block else "")
     )
 
 
