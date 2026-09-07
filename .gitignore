@@ -103,6 +103,7 @@ compose.*.local.yaml
 # 本 AI 编码助手（code-tui）的会话运行时状态：model.json 是模型配置，
 # sessions/ 记录对话过程——与 .codex-resume.md 同理属会话级状态，不入库
 .codetui/
+.workbuddy
 
 # Private release/data-migration artifacts; never commit.
 .artifacts/
