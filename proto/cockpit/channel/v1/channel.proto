@@ -1,0 +1,76 @@
+syntax = "proto3";
+package cockpit.channel.v1;
+import "cockpit/orchestrator/v1/orchestrator.proto";
+import "cockpit/common/v1/common.proto";
+import "cockpit/agent/v1/agent.proto";
+
+// 端云持久双向流。Edge 作为客户端发起并保持，所有请求/响应/主动事件多路复用。
+service EdgeCloudChannel {
+  rpc Connect (stream UpFrame) returns (stream DownFrame);
+  // 云端编排器调用指定车辆的端侧快执行器。Gateway 将该调用复用到车辆活跃 bidi 流。
+  rpc DispatchToEdge (EdgeCallEnvelope) returns (EdgeResult);
+}
+
+// 上行帧（Edge -> Cloud）
+message UpFrame {
+  string correlation_id = 1;            // 关联一次请求-响应
+  oneof body {
+    Hello hello = 2;                    // 握手（首帧）
+    cockpit.orchestrator.v1.HandleRequest request = 3;
+    Ack ack = 4;                        // 对 down 帧的确认（幂等/可靠性）
+    Ping ping = 5;
+    EdgeResult edge_result = 6;         // 端→云：中枢调度的车端步骤执行结果
+  }
+}
+
+// 下行帧（Cloud -> Edge）
+message DownFrame {
+  string correlation_id = 1;
+  oneof body {
+    HelloAck hello_ack = 2;
+    cockpit.orchestrator.v1.HandleEvent event = 3;
+    Proactive proactive = 4;            // 主动下发（如低电量提醒）
+    Pong pong = 5;
+    EdgeCall edge_call = 6;             // 云→端：中枢调度的车端步骤（车控/媒体/状态查询）
+  }
+}
+
+message Hello {
+  string vehicle_id = 1;
+  string session_resume_token = 2;     // 断线重连：恢复会话
+  string device_cert_fingerprint = 3;  // 设备证书指纹
+  string session_token = 4;            // JWT 会话 token
+  map<string, string> meta = 5;
+}
+
+message HelloAck {
+  bool ok = 1;
+  string reason = 2;
+  uint32 heartbeat_sec = 3;            // 建议心跳间隔
+}
+
+message Ack { string frame_id = 1; uint64 seq = 2; }
+message Ping { int64 ts = 1; }
+message Pong { int64 ts = 1; }
+
+message Proactive {
+  string type = 1;                     // "low_battery" | "charging_reminder" | ...
+  string speech = 2;
+}
+
+// 中枢调度车端快思考：云→端下发意图，端经 VAL 执行后回 EdgeResult。
+// 车控只产 intent，执行权在 VAL（架构 §9.1）；EdgeResult 复用 Agent 执行语义，
+// 回到编排层直接走 executor._to_result，与云 Agent 结果同构。
+message EdgeCall {
+  string step_id = 1;
+  cockpit.common.v1.Intent intent = 2;          // name + slots（车控/媒体/状态查询）
+  map<string, string> meta = 3;                 // trace_id, answer_length, confirmed ...
+}
+message EdgeCallEnvelope {
+  string vehicle_id = 1;
+  EdgeCall call = 2;
+}
+message EdgeResult {
+  string step_id = 1;
+  cockpit.agent.v1.ExecuteResponse result = 2;  // status/speech/data/actions（复用 Agent 执行结果）
+}

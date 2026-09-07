@@ -1,0 +1,272 @@
+/* ───────────────────────────────────────────────────────────────────────────
+   Aurora Glass · 极光液态座舱 — 设计系统层（P0 地基）
+   设计契约：Figma Make guidelines/Guidelines.md v1.0
+   非破坏式：所有 token 以 --au-* 前缀命名，与现有 styles.css token 零冲突；
+   现有界面继续用旧 token 渲染，新组件/新页面（P1+）改用本层。
+   主题切换沿用 <html data-theme|data-font|data-touch>（见 settings.tsx）。
+   ─────────────────────────────────────────────────────────────────────────── */
+
+:root {
+  /* 字体（§7）：UI 中文/西文 + 仪表级等宽数字 */
+  --au-font-ui: 'Inter', 'Noto Sans SC', 'PingFang SC', 'HarmonyOS Sans SC', 'Microsoft YaHei', system-ui, sans-serif;
+  --au-font-mono: 'JetBrains Mono', ui-monospace, 'Cascadia Code', monospace;
+
+  /* 深绿底色（白绿风格深色版）*/
+  --au-bg: #060F0B;          /* Forest-950 页面最底层 */
+  --au-bg-2: #0A1A12;        /* Forest-900 */
+  --au-space-800: #0D1F15;
+  --au-space-700: #122A1D;
+  --au-space-600: #183826;
+  --au-space-500: #1E4630;
+
+  /* 文字三级暖白灰阶（正文绝不上虹彩）*/
+  --au-text: rgba(255, 255, 255, 0.92);   /* Primary   ≥8.5:1 */
+  --au-text-2: rgba(255, 255, 255, 0.56); /* Secondary ≥4.5:1 */
+  --au-text-3: rgba(255, 255, 255, 0.32); /* Tertiary  ≥3.0:1 */
+  --au-line: rgba(255, 255, 255, 0.07);
+  --au-line-2: rgba(255, 255, 255, 0.12);
+  /* 内嵌 surface 填充（玻璃面板内的子块/控件底色）——随主题反相，浅色下变浅墨而非透明白 */
+  --au-fill: rgba(255, 255, 255, 0.05);
+  --au-fill-2: rgba(255, 255, 255, 0.10);
+  --au-hi: rgba(255, 255, 255, 0.16); /* 顶缘高光 */
+
+  /* 交互绿：非 AI 时刻唯一高亮色（§5 铁律）*/
+  --au-primary: #34D399;
+  --au-primary-ink: #060F0B;
+
+  /* AI 签名渐变——翠绿极光（§4）。仅用于 §5 允许的 5 处。*/
+  --au-cyan: #6EE7B7;
+  --au-blue: #34D399;
+  --au-violet: #10B981;
+  --au-magenta: #059669;
+  --au-aurora: linear-gradient(135deg, #6EE7B7 0%, #34D399 33%, #10B981 66%, #059669 100%);
+  --au-aurora-conic: conic-gradient(from 0deg, #6EE7B7, #34D399, #10B981, #059669, #6EE7B7);
+
+  /* 语义色（实色，绝不虹彩化；A股红涨绿跌）*/
+  --au-up: #EF4444;          /* 涨（A股红）*/
+  --au-down: #22C55E;        /* 跌（A股绿）*/
+  --au-conf-high: #34D399;
+  --au-conf-mid: #F59E0B;
+  --au-conf-low: #6B7280;
+  --au-danger: #EF4444;
+  --au-warn: #F59E0B;
+  --au-online: #34D399;
+
+  /* AQI 7 档（§3-A）*/
+  --au-aqi-1: #34D399;       /* 优 0–50 */
+  --au-aqi-2: #A3E635;       /* 良 51–100 */
+  --au-aqi-3: #FCD34D;       /* 轻度 101–150 */
+  --au-aqi-4: #FB923C;       /* 中度 151–200 */
+  --au-aqi-5: #EF4444;       /* 重度 201–300 */
+  --au-aqi-6: #9333EA;       /* 严重 301+ */
+  --au-aqi-0: #6B7280;       /* 未知 */
+
+  /* 液态玻璃材质（§6 深色）*/
+  --au-glass-bg: rgba(255, 255, 255, 0.056);
+  --au-glass-blur: 32px;
+  --au-glass-tint: rgba(160, 230, 190, 0.09);
+  --au-glass-bd-top: rgba(255, 255, 255, 0.17);
+  --au-glass-bd-left: rgba(255, 255, 255, 0.13);
+  --au-glass-bd-right: rgba(255, 255, 255, 0.07);
+  --au-glass-bd-bottom: rgba(255, 255, 255, 0.05);
+  --au-glass-inset: inset 0 1px 0 rgba(255, 255, 255, 0.13);
+  --au-glass-fallback: rgba(16, 40, 28, 0.92); /* 不支持 backdrop-filter 时的纯色降级 */
+
+  /* 圆角（squircle，§8）*/
+  --au-r-sm: 8px;
+  --au-r-md: 12px;
+  --au-r-lg: 16px;
+  --au-r-xl: 20px;
+  --au-r-2xl: 24px;          /* 主面板推荐默认 */
+  --au-r-3xl: 28px;
+
+  /* 阴影 / 辉光（§8）*/
+  --au-shadow-sm: 0 4px 16px rgba(0, 0, 0, 0.30);
+  --au-shadow-md: 0 8px 32px rgba(0, 0, 0, 0.44);
+  --au-shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.55);
+  --au-glow-aurora: 0 0 32px rgba(52, 211, 153, 0.45);
+  --au-glow-teal: 0 4px 18px rgba(52, 211, 153, 0.40);
+
+  /* 玻璃面板完整投影（§6）*/
+  --au-glass-shadow: 0 8px 40px rgba(0, 0, 0, 0.50), 0 2px 12px rgba(0, 0, 0, 0.28), var(--au-glass-inset);
+}
+
+/* ─── 浅色主题（磨砂白绿，§3-B / §12）——沿用 [data-theme='light'] ─── */
+:root[data-theme='light'] {
+  --au-bg: #EDF7F2;
+  --au-bg-2: #E0F0E8;
+  --au-text: rgba(8, 32, 22, 0.92);
+  --au-text-2: rgba(8, 32, 22, 0.55);
+  --au-text-3: rgba(8, 32, 22, 0.30);
+  --au-line: rgba(8, 32, 22, 0.08);
+  --au-line-2: rgba(8, 32, 22, 0.14);
+  --au-fill: rgba(8, 32, 22, 0.045);
+  --au-fill-2: rgba(8, 32, 22, 0.08);
+  --au-hi: rgba(255, 255, 255, 0.85);
+  --au-primary: #059669;     /* 浅色加深以保对比 */
+
+  --au-glass-bg: rgba(255, 255, 255, 0.76);
+  --au-glass-tint: transparent;          /* 浅色去冷色 tint */
+  --au-glass-bd-top: rgba(255, 255, 255, 1);
+  --au-glass-bd-left: rgba(255, 255, 255, 1);
+  --au-glass-bd-right: rgba(8, 32, 22, 0.06);
+  --au-glass-bd-bottom: rgba(8, 32, 22, 0.06);
+  --au-glass-inset: inset 0 1px 0 rgba(255, 255, 255, 1);
+  --au-glass-fallback: rgba(255, 255, 255, 0.94);
+  --au-glass-shadow: 0 8px 32px rgba(8, 32, 22, 0.09), 0 2px 8px rgba(8, 32, 22, 0.05), var(--au-glass-inset);
+  --au-shadow-sm: 0 4px 16px rgba(8, 32, 22, 0.06);
+  --au-shadow-md: 0 8px 32px rgba(8, 32, 22, 0.09);
+  --au-shadow-lg: 0 16px 48px rgba(8, 32, 22, 0.12);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   液态玻璃容器（§6）
+   ═══════════════════════════════════════════════════════════════════════════ */
+.au-glass {
+  position: relative;
+  background: var(--au-glass-bg);
+  -webkit-backdrop-filter: blur(var(--au-glass-blur)) saturate(1.15);
+  backdrop-filter: blur(var(--au-glass-blur)) saturate(1.15);
+  border-top: 1px solid var(--au-glass-bd-top);
+  border-left: 1px solid var(--au-glass-bd-left);
+  border-right: 1px solid var(--au-glass-bd-right);
+  border-bottom: 1px solid var(--au-glass-bd-bottom);
+  border-radius: var(--au-r-2xl);
+  box-shadow: var(--au-glass-shadow);
+}
+/* 冷色 tint 叠层（深色才有；不抢内容点击）*/
+.au-glass::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--au-glass-tint);
+  pointer-events: none;
+  z-index: 0;
+}
+.au-glass > * { position: relative; z-index: 1; }
+
+/* 行车态降级：模糊 32→20px、不透明度升、辉光弱（§6/§11）。给 <html data-drive='on'> 用 */
+:root[data-drive='on'] .au-glass {
+  -webkit-backdrop-filter: blur(20px) saturate(1.1);
+  backdrop-filter: blur(20px) saturate(1.1);
+  background: rgba(255, 255, 255, 0.10);
+}
+
+/* 不支持 backdrop-filter（旧车机 webview）→ 纯色面板降级 */
+@supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+  .au-glass { background: var(--au-glass-fallback); }
+  .au-glass::before { display: none; }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   极光辅助件（§4 / §5）
+   ═══════════════════════════════════════════════════════════════════════════ */
+/* AI 内容虹彩描边包装器：1.5px 极光环 = AI 来源标识 */
+.au-aurora-border {
+  --au-ab-r: var(--au-r-2xl);
+  position: relative;
+  padding: 1.5px;
+  border-radius: calc(var(--au-ab-r) + 1.5px);
+  background: var(--au-aurora);
+  box-shadow: 0 0 28px rgba(52, 211, 153, 0.18), 0 0 56px rgba(16, 185, 129, 0.10);
+}
+.au-aurora-border > * { border-radius: var(--au-ab-r); }
+
+/* 极光文字（仅关键词/角标，绝不用于正文与数字）*/
+.au-aurora-text {
+  background: var(--au-aurora);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+}
+
+/* 仪表级等宽数字（§7 铁律：所有数值类数据必用）*/
+.au-num {
+  font-family: var(--au-font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+
+/* 聆听/思考态屏幕边缘极光辉光（类 Siri 激活态，§5）*/
+.au-edge-glow {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  pointer-events: none;
+  border: 2px solid transparent;
+  border-image: var(--au-aurora) 1;
+  animation: au-edge-aurora 1.6s ease-in-out infinite;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   标志性动效 keyframes（§10 / §8.4）
+   ═══════════════════════════════════════════════════════════════════════════ */
+/* 光球（数值照 Make V7 src/app/App.tsx）*/
+@keyframes au-orb-breathe      { 0%, 100% { opacity: 0.82; transform: scale(1); } 50% { opacity: 1; transform: scale(1.038); } }
+@keyframes au-orb-breathe-fast { 0%, 100% { opacity: 0.85; transform: scale(1); } 50% { opacity: 1; transform: scale(1.045); } }
+@keyframes au-orb-spin         { from { transform: rotate(0deg); }   to { transform: rotate(360deg); } }
+@keyframes au-orb-spin-r       { from { transform: rotate(360deg); } to { transform: rotate(0deg); } }
+@keyframes au-orb-pulse        { 0%, 100% { transform: scale(1); opacity: 0.86; } 25% { transform: scale(1.07); opacity: 1; } 75% { transform: scale(0.96); opacity: 0.80; } }
+@keyframes au-orb-ripple       { 0% { transform: translate(-50%, -50%) scale(0.85); opacity: 0.5; } 100% { transform: translate(-50%, -50%) scale(1.6); opacity: 0; } }
+@keyframes au-shimmer          { 0% { transform: translateX(-120%); } 100% { transform: translateX(220%); } }
+@keyframes au-rain             { 0% { transform: translateY(-30px); opacity: 0; } 10% { opacity: 1; } 85% { opacity: 0.55; } 100% { transform: translateY(360px); opacity: 0; } }
+@keyframes au-temp-float       { 0%, 100% { transform: translate(-50%, -52%); } 50% { transform: translate(-50%, calc(-52% - 10px)); } }
+@keyframes au-edge-pulse       { 0%, 100% { opacity: 0.20; } 50% { opacity: 0.48; } }
+@keyframes au-stream-cursor    { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+@keyframes au-edge-aurora      { 0%, 100% { opacity: 0.35; } 50% { opacity: 0.72; } }
+@keyframes au-flash            { 0% { background-color: rgba(52,211,153,0); } 15% { background-color: rgba(52,211,153,0.22); } 100% { background-color: rgba(52,211,153,0); } }
+@keyframes au-think            { 0%, 80%, 100% { transform: scale(0.6); opacity: 0.35; } 40% { transform: scale(1); opacity: 1; } }
+/* 对话动态态（A-6，照 Make 源）：思考三点弹跳 / 完成勾弹入 / 子步骤滑入 / 主动播报呼吸环 */
+@keyframes au-dot-bounce       { 0%, 60%, 100% { transform: translateY(0); opacity: 0.55; } 30% { transform: translateY(-7px); opacity: 1; } }
+@keyframes au-check-pop        { 0% { transform: scale(0); } 70% { transform: scale(1.25); } 100% { transform: scale(1); } }
+@keyframes au-slide-up         { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes au-proactive-pulse  { 0%, 100% { box-shadow: 0 0 0 0 rgba(52,211,153,0.30); } 50% { box-shadow: 0 0 0 6px rgba(52,211,153,0); } }
+@keyframes au-proactive-pulse-amber { 0%, 100% { box-shadow: 0 0 0 0 rgba(245,158,11,0.30); } 50% { box-shadow: 0 0 0 6px rgba(245,158,11,0); } }
+/* 右舞台地图（A-5）：路线流动虚线 / POI 标点呼吸 */
+@keyframes au-route-dash       { to { stroke-dashoffset: -36; } }
+@keyframes au-map-glow         { 0%, 100% { opacity: 0.45; } 50% { opacity: 0.9; } }
+
+/* 流式虹彩光标 */
+.au-cursor {
+  display: inline-block;
+  width: 0.5em;
+  height: 1.05em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  border-radius: 2px;
+  background: var(--au-aurora);
+  animation: au-stream-cursor 1s steps(1) infinite;
+}
+
+/* "刚变"高亮闪动（Dashboard 车身 diff / 数值变化，§8.4）*/
+.au-flash { animation: au-flash 2.5s ease-out 1; }
+
+/* 思考律动三点 */
+.au-think-dots { display: inline-flex; gap: 5px; align-items: center; }
+.au-think-dots i {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--au-primary);
+  animation: au-think 1.4s ease-in-out infinite;
+}
+.au-think-dots i:nth-child(2) { animation-delay: 0.2s; }
+.au-think-dots i:nth-child(3) { animation-delay: 0.4s; }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   小莱 AuroraOrb 光球（§10）——液态玻璃球 + 内部极光流动，设计记忆点
+   ═══════════════════════════════════════════════════════════════════════════ */
+/* 结构与动效在 AuroraOrb.tsx（size 相对内联样式，逐值照 Make V7）。此处仅留 class 钩子，
+   供 prefers-reduced-motion 命中（!important 覆盖内联 animation）。*/
+.au-orb { position: relative; flex: none; }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   车规无障碍（§11）：尊重 prefers-reduced-motion——所有循环动效静态降级
+   ═══════════════════════════════════════════════════════════════════════════ */
+@media (prefers-reduced-motion: reduce) {
+  .au-orb, .au-orb *, .au-edge-glow, .au-cursor, .au-flash, .au-think-dots i,
+  .chat *, .au-stage * {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

@@ -1,0 +1,1436 @@
+# commands.yaml — 车控命令 schema（来源：公版语音指令表 6.1）
+# 每个 object 声明：operates/attrs/modes/positions/units/online/drive_restricted/require_confirm/voice_forbidden
+
+objects:
+  seat:
+    display_name: 座椅
+    operates:
+    - open
+    - close
+    - set
+    - inc
+    - dec
+    attrs:
+    - temperature
+    - speed
+    modes:
+    - heating
+    - ventilation
+    - massage
+    - lumbar_support
+    - recline
+    - 加热
+    - 通风
+    - 按摩
+    - 腰托
+    - 放平
+    positions: true
+    units:
+    - degree
+    - level
+    - percent
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    edge_intents:
+    - seat.heating.off
+    - seat.heating.on
+    - seat.lumbar_support.off
+    - seat.lumbar_support.on
+    - seat.massage.off
+    - seat.massage.on
+    - seat.ventilation.off
+    - seat.ventilation.on
+    voice_forbidden: false
+    projects:
+    - project-a
+    - project-b
+    - project-c
+  window:
+    display_name: 车窗
+    operates:
+    - open
+    - close
+    - set
+    - inc
+    - dec
+    attrs:
+    - height
+    modes: []
+    positions: true
+    units:
+    - percent
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    edge_intents:
+    - window.close
+    - window.open
+    - window.set
+    voice_forbidden: false
+    projects:
+    - project-a
+    - project-b
+    - project-c
+  sunroof:
+    display_name: 天窗
+    operates:
+    - open
+    - close
+    - set
+    - inc
+    - dec
+    attrs:
+    - height
+    modes: []
+    positions: false
+    units:
+    - percent
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    edge_intents:
+    - sunroof.close
+    - sunroof.open
+    - sunroof.set
+    voice_forbidden: false
+    projects:
+    - project-a
+    - project-b
+    - project-c
+  sunshade:
+    display_name: 遮阳帘
+    operates:
+    - open
+    - close
+    - set
+    - inc
+    - dec
+    attrs:
+    - height
+    modes: []
+    positions: true
+    units:
+    - percent
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    edge_intents:
+    - sunshade.close
+    - sunshade.open
+    - sunshade.set
+    voice_forbidden: false
+    projects:
+    - project-a
+    - project-b
+    - project-c
+  aircon:
+    display_name: 空调
+    # 「设为 N 度」缺了 N 就不许猜（2026-08-04 泓舟裁定：记忆里有值就直接用，
+    # 记忆里确实没有值就追问几度）。此前无值的 `hvac.set` 会静默降级成「开空调」，
+    # 温度原地不动，而话术模板 `{value}度` 拿到空值渲染成一个单字「度」——
+    # journeys B3-3 就是这个形状。声明放在知识库而不是代码里：要不要追问是产品判断，
+    # 加一个对象＝加一行 YAML，`edge_call` 通用消费（零对象字面量）。
+    value_required_operates: [set]
+    operates:
+    - open
+    - close
+    - set
+    - inc
+    - dec
+    attrs:
+    - temperature
+    - speed
+    modes:
+    - internal
+    - external
+    - 除雾
+    - 除霜
+    - 制冷
+    - 制热
+    - 吹脚
+    - 吹人
+    - 吹面
+    - 内循环
+    - 外循环
+    - 前除雾
+    - 后除雾
+    - 制冷模式
+    - 制热模式
+    - 暖风
+    - 冷风
+    - 吹脚模式
+    - 吹脸
+    positions: true
+    units:
+    - degree
+    - level
+    - percent
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    edge_intents:
+    - aircon.wind_speed.dec
+    - aircon.wind_speed.inc
+    - aircon.wind_speed.set
+    - hvac.dec
+    - hvac.inc
+    - hvac.off
+    - hvac.on
+    - hvac.set
+    voice_forbidden: false
+    projects:
+    - project-a
+    - project-b
+    - project-c
+  ambient_light:
+    display_name: 氛围灯
+    operates:
+    - open
+    - close
+    - set
+    - inc
+    - dec
+    attrs:
+    - brightness
+    - color
+    modes: []
+    positions: false
+    units:
+    - level
+    - percent
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    edge_intents:
+    - ambient_light.off
+    - ambient_light.on
+    voice_forbidden: false
+    projects:
+    - project-a
+    - project-b
+    - project-c
+  low_beam:
+    display_name: 近光灯
+    operates:
+    - open
+    - close
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    voice_forbidden: true
+    projects:
+    - project-a
+    - project-b
+    - project-c
+  headlight:
+    display_name: 大灯
+    operates:
+    - open
+    - close
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: offline_ok
+    drive_restricted: false
+    drive_restricted_off: true
+    require_confirm: false
+    effect: write
+    edge_intents:
+    - headlight.off
+    - headlight.on
+    voice_forbidden: false
+    projects:
+    - project-a
+    - project-b
+    - project-c
+  warning_light:
+    # 双闪（危险报警灯）。**2026-08-19 从 headlight 里拆出来**（QA 卡 Q8 / I-050）：
+    # 生成流水线的 family 表原本把 `warning_light` 并进 `headlight`，
+    # 于是「打开双闪」在知识库里根本没有对应对象——端侧规则认得出 `warning_light`
+    # 却不在 LOCAL_INTENTS，整句上云，planner 在别的车控工具里就近挑一个。
+    # 真栈实测三次分别落 `power_mode.set` / `lane_assistance.close` / `hvac.off`
+    # ——**要开双闪却把空调关了**。它与大灯不是同一个开关：大灯照明、双闪示警，
+    # 行车中恰恰是最该能用的那一个，所以 drive_restricted 两向都不限制。
+    display_name: 双闪
+    operates:
+    - open
+    - close
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    edge_intents:
+    - warning_light.close
+    - warning_light.open
+    voice_forbidden: false
+    projects:
+    - project-a
+    - project-b
+    - project-c
+  trunk:
+    display_name: 后备箱
+    operates:
+    - open
+    - close
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: true
+    effect: write
+    edge_intents:
+    - trunk.close
+    - trunk.open
+    voice_forbidden: false
+    projects:
+    - project-a
+    - project-b
+    - project-c
+  door_lock:
+    display_name: 车门锁
+    operates:
+    - open
+    - close
+    attrs: []
+    modes: []
+    positions: true
+    units: []
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: true
+    effect: write
+    edge_intents:
+    - door_lock.close
+    - door_lock.open
+    voice_forbidden: false
+    projects:
+    - project-a
+    - project-b
+    - project-c
+  fuel_tank_cover:
+    display_name: 油箱盖
+    operates:
+    - open
+    - close
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: true
+    effect: write
+    edge_intents:
+    - fuel_tank_cover.close
+    - fuel_tank_cover.open
+    voice_forbidden: false
+    projects:
+    - project-a
+    - project-b
+    - project-c
+  charging_port:
+    display_name: 充电口盖
+    operates:
+    - open
+    - close
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: true
+    effect: write
+    edge_intents:
+    - charging_port.close
+    - charging_port.open
+    voice_forbidden: false
+    projects:
+    - project-a
+    - project-b
+    - project-c
+  rear_view_mirror:
+    display_name: 后视镜
+    operates:
+    - open
+    - close
+    - set
+    - inc
+    - dec
+    attrs: []
+    modes:
+    - fold
+    - unfold
+    - heating
+    - 折叠
+    - 展开
+    positions: true
+    units: []
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    edge_intents:
+    - rear_view_mirror.fold
+    - rear_view_mirror.unfold
+    voice_forbidden: false
+    projects:
+    - project-a
+    - project-b
+    - project-c
+  steering_wheel:
+    display_name: 方向盘
+    operates:
+    - set
+    - inc
+    - dec
+    attrs:
+    - height
+    modes:
+    - heating
+    positions: false
+    units:
+    - level
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    edge_intents:
+    - steering_wheel.heating.close
+    - steering_wheel.heating.open
+    - steering_wheel.height.dec
+    - steering_wheel.height.inc
+    - steering_wheel.height.set
+    voice_forbidden: false
+    projects:
+    - project-a
+    - project-b
+    - project-c
+  wiper:
+    display_name: 雨刮
+    operates:
+    - open
+    - close
+    - set
+    - inc
+    - dec
+    attrs:
+    - speed
+    modes: []
+    positions: false
+    units:
+    - level
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    edge_intents:
+    - wiper.off
+    - wiper.on
+    - wiper.speed.dec
+    - wiper.speed.inc
+    - wiper.speed.set
+    voice_forbidden: false
+    projects:
+    - project-a
+    - project-b
+    - project-c
+  fragrance:
+    display_name: 香氛
+    operates:
+    - open
+    - close
+    - set
+    attrs: []
+    modes: []
+    positions: false
+    units:
+    - level
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    edge_intents:
+    - fragrance.off
+    - fragrance.on
+    - fragrance.set
+    voice_forbidden: false
+    projects:
+    - project-a
+    - project-b
+  tire_pressure_monitoring:
+    display_name: 胎压监测
+    operates:
+    - query
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: false
+    effect: read
+    edge_intents:
+    - tire_pressure.query
+    voice_forbidden: false
+    projects:
+    - project-a
+    - project-b
+    - project-c
+  dashcam:
+    display_name: 行车记录仪
+    operates:
+    - open
+    - close
+    - query
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    edge_intents:
+    - dashcam.close
+    - dashcam.open
+    voice_forbidden: false
+    projects:
+    - project-a
+    - project-b
+    - project-c
+  # ── R4.1b P0：端侧对象化（空气净化 / 导航播报 / 按键音）──
+  air_purifier:
+    display_name: 空气净化
+    operates: [open, close]
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    voice_forbidden: false
+    projects: []
+  navi_broadcast:
+    display_name: 导航播报
+    operates: [open, close, set]
+    attrs: []
+    modes: [concise, detailed, ai, standard]
+    positions: false
+    units: []
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    voice_forbidden: false
+    projects: []
+  key_tone:
+    display_name: 按键音
+    operates: [open, close]
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    voice_forbidden: false
+    projects: []
+  scene_mode:
+    display_name: 情景模式
+    operates:
+    - set
+    - switch
+    attrs: []
+    # 值域**开放**（modes 为空 = 不做枚举校验）：用户可自然语言创建场景（scene.create），
+    # 场景键集合是运行期数据（scene-orchestrator 的 PG 表 + scenes.yaml），不是出厂词表——
+    # 枚举校验会把「钓鱼模式」这类用户场景挡在状态镜像之外，也无法表达退出态 off。
+    # 权威场景集在 scene-orchestrator（激活前已校验场景存在），VAL 这里只做状态标记，无安全面。
+    # 内置场景键（供参考）：nap/camping/movie/romantic/meditation + off（退出）；
+    # 中文→键的归一仍走 entities.yaml scene_modes（小憩→nap、露营→camping…）。
+    modes: []
+    positions: false
+    units: []
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    edge_intents:
+    - scene_mode.set
+    voice_forbidden: false
+    projects:
+    - project-a
+    - project-b
+    - project-c
+  driving_mode:
+    display_name: 驾驶模式
+    operates:
+    - set
+    - close
+    - switch
+    attrs: []
+    modes:
+    - eco
+    - sport
+    - comfort
+    - snow
+    - offroad
+    - normal
+    - 节能
+    - 运动
+    - 舒适
+    - 雪地
+    - 越野
+    - 标准
+    positions: false
+    units: []
+    online: offline_ok
+    drive_restricted: true
+    require_confirm: false
+    effect: write
+    voice_forbidden: false
+    projects:
+    - project-a
+    - project-b
+    - project-c
+  power_mode:
+    display_name: 动力模式
+    operates:
+    - set
+    - switch
+    attrs: []
+    modes:
+    - normal
+    - sport
+    - eco
+    - 标准
+    - 运动
+    - 节能
+    positions: false
+    units: []
+    online: offline_ok
+    drive_restricted: true
+    require_confirm: false
+    effect: write
+    edge_intents:
+    - power_mode.set
+    voice_forbidden: false
+    projects:
+    - project-a
+    - project-b
+    - project-c
+  energy_recovery:
+    display_name: 能量回收
+    operates:
+    - set
+    - inc
+    - dec
+    attrs:
+    - level
+    modes: []
+    positions: false
+    units:
+    - level
+    online: offline_ok
+    drive_restricted: true
+    require_confirm: false
+    effect: write
+    edge_intents:
+    - energy_recovery.dec
+    - energy_recovery.inc
+    - energy_recovery.set
+    voice_forbidden: false
+    projects:
+    - project-a
+    - project-b
+    - project-c
+  lane_departure_assistance:
+    display_name: 车道偏离预警
+    operates:
+    - open
+    - close
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: offline_ok
+    drive_restricted: true
+    require_confirm: false
+    effect: write
+    edge_intents:
+    - lane_departure_assistance.close
+    - lane_departure_assistance.open
+    voice_forbidden: false
+    projects:
+    - project-a
+    - project-b
+    - project-c
+  lane_assistance:
+    display_name: 车道保持辅助
+    operates:
+    - open
+    - close
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: offline_ok
+    drive_restricted: true
+    require_confirm: false
+    effect: write
+    edge_intents:
+    - lane_assistance.close
+    - lane_assistance.open
+    voice_forbidden: false
+    projects:
+    - project-a
+    - project-b
+    - project-c
+  # ⚠ 除雾是**独立对象**不是 aircon 的一个 mode（2026-08-10 补）。
+  # aircon 的 `modes` 里一直有「除雾/除霜/前除雾/后除雾」，但那条路走不通：
+  # ① `hvac.set` 的能力描述是「设置空调温度」（aircon 声明了 attrs，`_mode_options`
+  #    刻意不把 19 个 mode 灌进描述），云侧 planner 无从得知它能除雾；
+  # ② mode 表达不了「关」——`hvac.set mode=除雾` 没有对应的关闭形态；
+  # ③ 端侧 `classify()` 的 aircon 分支把无 value 的 set 一律映射成 `hvac.on`，
+  #    mode 在映射里被丢掉，「空调开除雾」实际执行成"只开空调"（2026-08-10 实测）。
+  # 真车上前挡除雾（吹热风到风挡）与后挡除雾（电加热丝）本就是两个物理开关，
+  # 建成两个对象后 `front_defogger.open` 这个名字本身就是判别性文本——正是
+  # `capabilities.py` 那次 A/B 证明的「intent 名本身就够 planner 区分」。
+  # 除霜与除雾映射到同一组能力：真车同一个按钮，差异只在词表层（见 fast_intent）。
+  front_defogger:
+    display_name: 前挡除雾
+    operates:
+    - open
+    - close
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    edge_intents:
+    - front_defogger.close
+    - front_defogger.open
+    voice_forbidden: false
+    projects:
+    - project-a
+    - project-b
+    - project-c
+  rear_defogger:
+    display_name: 后挡除雾
+    operates:
+    - open
+    - close
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    edge_intents:
+    - rear_defogger.close
+    - rear_defogger.open
+    voice_forbidden: false
+    projects:
+    - project-a
+    - project-b
+    - project-c
+  accompany_home:
+    display_name: 伴我回家灯光
+    operates:
+    - open
+    - close
+    - set
+    attrs:
+    - second
+    modes: []
+    positions: false
+    units:
+    - second
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    edge_intents:
+    - accompany_home.close
+    - accompany_home.open
+    voice_forbidden: false
+    projects:
+    - project-a
+    - project-b
+    - project-c
+  volume:
+    display_name: 音量
+    # 静音/取消静音归**音量**不归媒体（2026-08-19，QA 卡 Q8 / I-049）：卡上写的是
+    # `media.mute-unmute`，取证后按知识库自己的口径改了——① 飞书公版指令表里
+    # 「打开静音」的域是 `setting` 不是 `media`（`baseline_routing.json` 有这条）；
+    # ② `nlu_objects.yaml` 头部写着「`声音` 全量 62% 是音量（导航音量/媒体音量/**静音**）」；
+    # ③ 静音要压住的是**全部出声**（导航播报/来电/媒体），而 `media.pause` 是停播放
+    # ——两件事，放同一个对象下才不会让 planner 面对两个分不开的工具。
+    operates:
+    - set
+    - inc
+    - dec
+    - mute
+    - unmute
+    attrs: []
+    modes: []
+    positions: false
+    units:
+    - level
+    - percent
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    edge_intents:
+    - volume.dec
+    - volume.inc
+    - volume.mute
+    - volume.set
+    - volume.unmute
+    voice_forbidden: false
+    projects:
+    - project-a
+    - project-b
+    - project-c
+  page:
+    display_name: 界面页面
+    operates:
+    - open
+    - close
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: online_only
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    voice_forbidden: false
+    projects:
+    - project-a
+    - project-b
+    - project-c
+  screen:
+    display_name: 屏幕
+    operates:
+    - open
+    - close
+    - set
+    attrs:
+    - brightness
+    modes: []
+    positions: false
+    units:
+    - level
+    - percent
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    edge_intents:
+    - screen.brightness.dec
+    - screen.brightness.inc
+    - screen.brightness.set
+    voice_forbidden: false
+    projects:
+    - project-a
+    - project-b
+    - project-c
+  app:
+    display_name: 应用
+    operates:
+    - open
+    - close
+    - query
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: online_only
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    voice_forbidden: false
+    projects:
+    - project-a
+    - project-b
+    - project-c
+  weather:
+    display_name: 天气
+    operates:
+    - query
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: online_only
+    drive_restricted: false
+    require_confirm: false
+    effect: read
+    voice_forbidden: false
+    projects:
+    - project-a
+    - project-b
+    - project-c
+  bluetooth:
+    display_name: 蓝牙
+    operates:
+    - open
+    - close
+    - connect
+    - disconnect
+    - query
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    voice_forbidden: false
+    projects: []
+  wifi:
+    display_name: WiFi
+    operates:
+    - open
+    - close
+    - connect
+    - disconnect
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    voice_forbidden: false
+    projects: []
+  hotspot:
+    display_name: 个人热点
+    operates:
+    - open
+    - close
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    voice_forbidden: false
+    projects: []
+  phone:
+    display_name: 电话
+    operates:
+    - open
+    - close
+    - query
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    voice_forbidden: false
+    projects: []
+  contacts:
+    display_name: 通讯录
+    operates:
+    - open
+    - close
+    - query
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    voice_forbidden: false
+    projects: []
+  call_log:
+    display_name: 通话记录
+    operates:
+    - open
+    - close
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    voice_forbidden: false
+    projects: []
+  radio:
+    display_name: 收音机
+    operates:
+    - open
+    - close
+    - play
+    - set
+    attrs: []
+    modes:
+    - FM
+    - AM
+    positions: false
+    units: []
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    voice_forbidden: false
+    projects: []
+  online_radio:
+    display_name: 网络电台
+    operates:
+    - open
+    - close
+    - play
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: online_only
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    voice_forbidden: false
+    projects: []
+  music:
+    display_name: 音乐
+    operates:
+    - play
+    - pause
+    - stop
+    - switch
+    - resume
+    - close
+    - query
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    voice_forbidden: false
+    projects: []
+  audiobook:
+    display_name: 有声书
+    operates:
+    - play
+    - pause
+    - stop
+    - switch
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: online_only
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    voice_forbidden: false
+    projects: []
+  opera:
+    display_name: 戏曲
+    operates:
+    - play
+    - stop
+    - switch
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: online_only
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    voice_forbidden: false
+    projects: []
+  news:
+    display_name: 新闻
+    operates:
+    - play
+    - stop
+    - query
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: online_only
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    voice_forbidden: false
+    projects: []
+  video:
+    display_name: 视频
+    operates:
+    - play
+    - pause
+    - stop
+    - resume
+    - close
+    - set
+    attrs: []
+    modes:
+    - full_screen
+    positions: false
+    units: []
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    voice_forbidden: false
+    projects: []
+  TV:
+    display_name: 电视
+    operates:
+    - open
+    - close
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    voice_forbidden: false
+    projects: []
+  equalizer:
+    display_name: 均衡器
+    operates:
+    - set
+    - switch
+    - open
+    - close
+    attrs: []
+    modes:
+    - rock
+    - pop
+    - classical
+    - jazz
+    - country
+    - custom
+    - standard
+    - original
+    positions: false
+    units: []
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    voice_forbidden: false
+    projects: []
+  voice_assistant:
+    display_name: 语音助手
+    operates:
+    - open
+    - close
+    - stop
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    voice_forbidden: false
+    projects: []
+  system:
+    display_name: 系统
+    operates:
+    - open
+    - close
+    - set
+    - query
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    voice_forbidden: false
+    projects: []
+  surround_view:
+    display_name: 360环视
+    operates:
+    - open
+    - close
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    voice_forbidden: false
+    projects: []
+  dashboard:
+    display_name: 仪表
+    operates:
+    - open
+    - close
+    - set
+    - query
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    voice_forbidden: false
+    projects: []
+  auto_hold:
+    display_name: 自动驻车
+    operates:
+    - open
+    - close
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: offline_ok
+    drive_restricted: true
+    require_confirm: false
+    effect: write
+    voice_forbidden: false
+    projects: []
+  epb:
+    display_name: 电子手刹
+    operates:
+    - open
+    - close
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: offline_ok
+    drive_restricted: true
+    require_confirm: false
+    effect: write
+    voice_forbidden: false
+    projects: []
+  frunk:
+    display_name: 前备箱
+    operates:
+    - open
+    - close
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: true
+    effect: write
+    voice_forbidden: false
+    projects: []
+  interaction:
+    display_name: 交互
+    operates:
+    - confirm
+    - cancel
+    - select
+    - prev
+    - next
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    voice_forbidden: false
+    projects: []
+  navigation:
+    display_name: 导航
+    operates:
+    - plan
+    - cancel
+    - start
+    - resume
+    - locate
+    - query
+    - open
+    - close
+    - set
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: online_only
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    voice_forbidden: false
+    projects: []
+  map:
+    display_name: 地图
+    operates:
+    - open
+    - close
+    - set
+    attrs: []
+    modes:
+    - 2D
+    - 3D
+    - satellite
+    positions: false
+    units: []
+    online: online_only
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    voice_forbidden: false
+    projects: []
+  food:
+    display_name: 美食
+    operates:
+    - query
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: online_only
+    drive_restricted: false
+    require_confirm: false
+    effect: read
+    voice_forbidden: false
+    projects: []
+  hotel:
+    display_name: 酒店
+    operates:
+    - query
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: online_only
+    drive_restricted: false
+    require_confirm: false
+    effect: read
+    voice_forbidden: false
+    projects: []
+  flight:
+    display_name: 航班
+    operates:
+    - query
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: online_only
+    drive_restricted: false
+    require_confirm: false
+    effect: read
+    voice_forbidden: false
+    projects: []
+  train:
+    display_name: 火车票
+    operates:
+    - query
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: online_only
+    drive_restricted: false
+    require_confirm: false
+    effect: read
+    voice_forbidden: false
+    projects: []
+  stock:
+    display_name: 股票
+    operates:
+    - query
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: online_only
+    drive_restricted: false
+    require_confirm: false
+    effect: read
+    voice_forbidden: false
+    projects: []
+  media:
+    display_name: 媒体
+    operates:
+    - start
+    - pause
+    - stop
+    - switch
+    - play
+    - close
+    - query
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: false
+    effect: write
+    voice_forbidden: false
+    projects: []
+  battery:
+    display_name: 电量
+    operates:
+    - query
+    attrs: []
+    modes: []
+    positions: false
+    units: []
+    online: offline_ok
+    drive_restricted: false
+    require_confirm: false
+    effect: read
+    voice_forbidden: false
+    projects: []

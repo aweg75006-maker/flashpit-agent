@@ -1,0 +1,6 @@
+grpcio==1.66.2
+protobuf==7.35.0
+nats-py>=2.6.0
+asyncpg>=0.29.0
+# R4.1 P0: 语义路由的 embedding 经 llm-gateway gRPC Embed（→百炼 text-embedding-v4，与 memory
+# 同源），registry 镜像不再打包本地 embedding 模型；无 embedding 源时诚实降级关键词打分。

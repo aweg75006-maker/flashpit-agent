@@ -1,0 +1,149 @@
+agent_id: reminder
+version: 0.1.0
+display_name: 智能提醒
+category: core
+trust_level: first_party
+deployment: cloud
+latency_budget_ms: 8000     # 常规确定性解析毫秒级；LLM 兜底解析一跳 @fast 留余量
+fallback: chitchat
+
+capabilities:
+  - intent: reminder.create
+    description: 创建定时提醒、位置提醒或待办。支持绝对时间（明天早上八点/周五下午三点）、
+      相对时间（半小时后/20分钟后）、重复（每天/每个工作日/每周X）；**到某地/离开某地
+      触发的位置提醒**（到公司提醒我拿文件）；只说"记一下"不带时间则存为待办；
+      到点后说"过10分钟再提醒我"直接改期原条目（snooze）。
+    slots: [title, time_text, kind]
+    examples: ["明天早上八点提醒我带充电线", "半小时后提醒我给客户回电话",
+               "周五下午三点叫我去接孩子", "记一下要买牛奶", "帮我记个待办周末洗车",
+               "每天早上八点提醒我吃药", "过10分钟再提醒我",
+               "到公司提醒我拿文件", "到家提醒我收快递", "离开公司提醒我买菜"]
+  - intent: reminder.create_batch
+    description: 为同一事项一次创建两个明确时刻的提醒；仅处理“某时提醒我某事，另一时刻
+      再提醒我一次”的同日双提醒句，两个时刻整组写入，不依赖规划器生成两个步骤。
+    slots: []
+    # **整句型能力**：它消费整句原话（`_create_batch` 读 `raw_text`、不读槽），
+    # 一步把这句话里的两个时刻都建完 ⇒ 同一份计划里排两步就是把整组建两遍。
+    # 真栈 SL1 实测出过 4 张卡 4 个 id，且那组提醒随后既清不掉又占着序数参照系。
+    whole_utterance: true
+    examples: ["明天下午四点提醒我开会，三点半再提醒我一次"]
+  - intent: reminder.list
+    description: 查询提醒/待办/日程安排（今天/明天/后天/未来三天/这周/全部/待办）
+    slots: [scope, date_text]
+    examples: ["我今天有什么安排", "我有哪些提醒", "看看我的待办", "明天有什么提醒",
+               "这周有什么安排", "未来三天有什么提醒"]
+  - intent: reminder.complete
+    description: 完成某条提醒/待办（按序号或内容）
+    slots: [index, title]
+    slot_shapes: {index: ordinal}   # C3 值形状，理由见 reminder.cancel 那处
+    examples: ["完成第二条", "买牛奶那条办完了", "标记第一个完成", "完成提醒：给客户回电话"]
+  - intent: reminder.cancel
+    description: 取消某条提醒，或清空全部（清空需二次确认）；按标题取消时 title 填用户
+      点名的原文，别转述或简写（子串匹配，放宽一个字就会命中另一条）
+    slots: [index, title, all]
+    # C3 值形状：`_clarify_multi` 追问「要取消哪条？说「取消第几条」」，而 `index` 是
+    # **封闭值域**槽——`_resolve_targets` 只认数字与「第N条」。不声明形状时 wait_slot
+    # 会把用户下一句整句塞进来：真栈长会话 `e15ac1e` family turn 18/73/76 连撞三轮
+    # （「列出我现在进行中的提醒」被当成序号答案），挂起一直活着，直到 turn 77
+    # 「取消导航」被挂起取消吞掉——**黑洞喂大了下一个洞**。
+    slot_shapes: {index: ordinal}
+    # ⚠ 「第二个先取消，其他继续」**刻意只进范例库不进这里**（C10-F）：同一句话
+    # 声明两遍就有两处要维护，而这条要教的是「复合说法怎么落域」——那正是范例库
+    # 的职责面（检索后作 few-shot），不是 catalog 的。
+    examples: ["取消第二条提醒", "不用提醒我回电话了", "把提醒都清空"]
+  - intent: reminder.update
+    description: 修改某条提醒的时间（改到/推迟/提前/换个时间）；按标题或"第N条"定位，
+      缺新时间会追问后续接
+    slots: [index, title, time_text]
+    slot_shapes: {index: ordinal}   # C3 值形状，理由见 reminder.cancel 那处
+    examples: ["把接孩子改到五点", "买牛奶那条推迟到明天九点", "改第二条到晚上八点",
+               "带充电线的提醒改个时间"]
+
+# 确定性路由（R2.1）：弱 LLM 常把"提醒我X"落到 chitchat。guard 排除车辆功能语境的
+# "提醒"（限速/车道/碰撞等设备对象词，见 orchestrator/edge/fast_intent.py:1090）与
+# 说明书查询（"限速提醒是什么"归 manual）。pattern 为方向性草案，以对抗语料
+# 实测收敛。
+route_hints:
+  # XS1：账号级「当前进行中任务」是 reminder.list 的窄查询句，不交给闲聊从历史文本
+  # 重构。整句锚与「哪些」问法把完成命令、状态陈述、泛任务讨论全部挡在外面。
+  - pattern: '^\s*(?:请|帮我|给我)?\s*(?:查|查询|看|看看|列(?:一下|出)?)?\s*(?:我)?(?:现在|当前)?(?:有)?哪些(?:正在进行|进行中|未完成)的?(?:任务|提醒|待办|安排)\s*[？?]*$'
+    intent: reminder.list
+    policy: replace
+    priority: 125
+  # SL1：同一事项两个时刻是一条原子业务意图。MiniMax 真栈会把同一句随机规划成
+  # 两步/一步/零步；严格整句锚只接这一种句形，查询、否定、条件句和跨事项一律不碰。
+  - pattern: '^\s*(?:今天|明天|后天|大后天)(?=[^，,；;]{0,48}(?:提醒我|叫我))[^，,；;]{1,64}[，,；;]\s*(?:凌晨|早上|早晨|上午|中午|下午|傍晚|晚上|夜里)?(?:\d{1,2}|[一二两三四五六七八九十]+)\s*(?:点(?:半|一刻|三刻|[一二两三四五六七八九十\d]+分?)?|[:：]\s*[0-5]\d)[^，,；;]{0,16}再(?:提醒|叫)我(?:一|1)次[。！!]*\s*$'
+    intent: reminder.create_batch
+    policy: replace
+    priority: 131
+    guard: '(?:别|不要|不用|取消|撤销|查询|哪些|如果|要是|假如|若|只要|除非)'
+  # M-A A2-2b：赛事事实与提醒是 producer→consumer 组合。MiniMax 真栈出现「goal 写了设置提醒，
+  # steps 却只给 info.sports」；这里用 append 只补缺失消费者，绝不 replace 掉负责写
+  # REMINDABLE_ACTIVE 的赛事步骤。consumer 对明确事件指代做 3.5s 有界等待，覆盖并行时序。
+  - pattern: '(?=.*(?:提醒我|叫我|别忘了))(?=.*(?:第\s*[一二两三四五六七八九十\d]+\s*场|这场|那场|开赛|开场|比赛开始|开始前)).*'
+    intent: reminder.create
+    policy: append
+    priority: 57
+    slots: {title: "$text", time_text: "$text"}
+  # 【reminder.create 的 replace route_hint 已于 2026-08-02 退役】
+  #   **触发它的不是「还需要吗」，而是「它正在做坏事」**——意图落域对抗测试首轮实测：
+  #   4 条用例里 planner 的 goal 全都写对了（「查询明天的提醒列表」「把那条标记为完成」
+  #   「查询明天的天气」），steps 却被这条 replace 整条改写成 `reminder.create`：
+  #     · 明天要提醒我的事有哪些   goal=查询明天的提醒列表     → s_hint_reminder_create
+  #     · 接下来三天要提醒我什么   （同族）                    → s_hint_reminder_create
+  #     · 那条提醒我已经做完了     goal=把…标记为完成          → s_hint_reminder_create
+  #     · 帮我查下明天的天气，先别提醒我带伞                     → s_hint_reminder_create
+  #   guard 已经补过四轮（回忆式/疑问式/条件式/赛事式），这是**第五类**（列表查询 /
+  #   完成 / 否定）。规则的边界比说法的边界窄，补下去没有尽头——findings §2 簇 B 把这
+  #   现象定性成「reminder 域动词分工分不开」，实测证明**分得开的是模型、踩掉它的是这条规则**。
+  #   判据（规则退役流水线）：双臂裸跑
+  #   minimax:MiniMax-M3 / deepseek:deepseek-v4-flash 各 ×2 轮，其 **18 条命中语料全覆盖**
+  #   （非抽样），B 臂（摘掉本条）**18/18 全对** → 模型 + 范例（reminder 域 23 条，
+  #   list/create/update/complete/cancel 五个动词都有）已经自己会了。
+  #   ⚠ 证据只覆盖上述两档；本 hint 家族当初是为 **MiMo** 写的（`route_hints.py` 开篇），
+  #     本环境 MiMo 无可用 key，**切回 MiMo 须复验**。
+  #   回归保护未删：18 条命中句里的代表形态已改端到端口径迁入落域语料。
+  #   要恢复：git log -S '提醒我|叫我(?!.{0,4}(小舟|什么))' 找回原块。
+  # 【reminder.list 的 route_hint 已于 2026-07-29 退役】判据：双臂裸跑
+  #   deepseek:deepseek-v4-flash / minimax:MiniMax-M3 各 ×2 轮，其 4 条命中语料**全覆盖**
+  #   （非抽样——抽 3 句会系统性高估，命中面越大的规则越容易被放行）；
+  #   摘掉它之后仍全部落对 → 模型 + 范例已经自己会了。
+  #   ⚠ 证据只覆盖上述两档。本 hint 家族当初是为 **MiMo** 写的
+  #     （route_hints.py 开篇：「弱 LLM（MiMo）常漏/误路由」），而本环境
+  #     MiMo 无可用 key（探针 all models failed），**切回 MiMo 须复验**。
+  #   回归保护未删：命中句已改端到端口径迁入 mode_routing_cases.yaml。
+  #   要恢复：git log -S '我(今天|明天|后天|这周|未来.{0,2}天)' 找回原块。
+  # 【reminder.cancel 的 route_hint 已于 2026-07-29 退役】判据：双臂裸跑
+  #   deepseek:deepseek-v4-flash / minimax:MiniMax-M3 各 ×2 轮，其 4 条命中语料**全覆盖**
+  #   （非抽样——抽 3 句会系统性高估，命中面越大的规则越容易被放行）；
+  #   摘掉它之后仍全部落对 → 模型 + 范例已经自己会了。
+  #   ⚠ 证据只覆盖上述两档。本 hint 家族当初是为 **MiMo** 写的
+  #     （route_hints.py 开篇：「弱 LLM（MiMo）常漏/误路由」），而本环境
+  #     MiMo 无可用 key（探针 all models failed），**切回 MiMo 须复验**。
+  #   回归保护未删：命中句已改端到端口径迁入 mode_routing_cases.yaml。
+  #   要恢复：git log -S '(取消|删掉|删除|不用).{0,4}(提醒|待' 找回原块。
+  # 【reminder.update 的 route_hint 已于 2026-07-29 退役】判据：双臂裸跑
+  #   deepseek:deepseek-v4-flash / minimax:MiniMax-M3 各 ×2 轮，其 4 条命中语料**全覆盖**
+  #   （非抽样——抽 3 句会系统性高估，命中面越大的规则越容易被放行）；
+  #   摘掉它之后仍全部落对 → 模型 + 范例已经自己会了。
+  #   ⚠ 证据只覆盖上述两档。本 hint 家族当初是为 **MiMo** 写的
+  #     （route_hints.py 开篇：「弱 LLM（MiMo）常漏/误路由」），而本环境
+  #     MiMo 无可用 key（探针 all models failed），**切回 MiMo 须复验**。
+  #   回归保护未删：命中句已改端到端口径迁入 mode_routing_cases.yaml。
+  #   要恢复：git log -S '(改到|改成|推迟到|提前到|延到|换到)\s*' 找回原块。
+  # 【reminder.complete 的 route_hint 已于 2026-07-29 退役】判据：双臂裸跑
+  #   deepseek:deepseek-v4-flash / minimax:MiniMax-M3 各 ×2 轮，其 2 条命中语料**全覆盖**
+  #   （非抽样——抽 3 句会系统性高估，命中面越大的规则越容易被放行）；
+  #   摘掉它之后仍全部落对 → 模型 + 范例已经自己会了。
+  #   ⚠ 证据只覆盖上述两档。本 hint 家族当初是为 **MiMo** 写的
+  #     （route_hints.py 开篇：「弱 LLM（MiMo）常漏/误路由」），而本环境
+  #     MiMo 无可用 key（探针 all models failed），**切回 MiMo 须复验**。
+  #   回归保护未删：命中句已改端到端口径迁入 mode_routing_cases.yaml。
+  #   要恢复：git log -S '(完成|办完|做完|搞定)了?.{0,4}(第[' 找回原块。
+requires_permissions:
+  - profile.read        # 提醒属用户数据域 + shared_state 经 profile KV；不新增 scope
+  - profile.write
+edge_intents: []
+# M3 P1 位置提醒：围栏判定读的是 NATS 车况广播的 location（不是 meta 下发），
+# 但创建期解析地点要按当前位置搜 POI，故声明 location。
+context_scopes: [location]

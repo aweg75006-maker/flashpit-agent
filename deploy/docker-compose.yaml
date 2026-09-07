@@ -1,0 +1,948 @@
+# PoC 全栈一键起。生产部署见 deploy/helm/。
+# 服务端口规划见各服务 README；gRPC 服务间通过容器 DNS 互通。
+name: car-agent
+
+# This file is included by ../compose.yaml.  Do not invoke it as the first
+# Compose file: that would make deploy/ the project directory and bypass root .env.
+
+x-python-env: &python-env
+  # B3 部署形态闸：dev（默认，零校验，逐字现状）| demo（软校验，聚合 warning）|
+  # prod（硬校验，任一 fail-open 配置即拒绝启动）。校验表见 runtime/profile.py::CHECKS。
+  DEPLOY_PROFILE: ${DEPLOY_PROFILE:-dev}
+  REGISTRY_ADDR: registry:50051
+  LLM_GATEWAY_ADDR: llm-gateway:50052
+  MEMORY_ADDR: memory:50053
+  CLOUD_PLANNER_ADDR: cloud-planner:50054
+  PAYMENT_GATEWAY_ADDR: payment-gateway:50071
+
+  NATS_URL: nats://nats:4222
+  REDIS_URL: redis://redis:6379/0
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  # 数据真实性严格栈（治理 P2）：on=任何 provider 决议落 mock 即启动失败（含 LLM/embed/ASR/TTS），
+  # 演示/验收前翻开；默认 off=CI 与离线开发全 mock 照跑。豁免域见 .env.example。
+  REQUIRE_REAL_PROVIDERS: ${REQUIRE_REAL_PROVIDERS:-off}
+  REQUIRE_REAL_EXEMPT: ${REQUIRE_REAL_EXEMPT:-parking}
+  # 开放域模型分层（task 4）：Agent（如 chitchat）据此选快/重模型
+  LLM_MODEL_PRIMARY: ${LLM_MODEL_PRIMARY:-mimo-v2.5-pro}
+  LLM_MODEL_FAST: ${LLM_MODEL_FAST:-mimo-v2.5}
+  # T2 循环预算（M2 P2 分档）：**这两个是全局覆盖，故意留空**——留空才让 loop.py 按
+  # plan.complexity 选档（Interactive 2次/8s、Complex 3次/12s）。填上等于两档同时压死，
+  # 只在需要一键回退放宽前（2/5000）或评测钉档时才设。
+  PLANNER_LOOP_MAX_ITERS: ${PLANNER_LOOP_MAX_ITERS:-}
+  PLANNER_LOOP_BUDGET_MS: ${PLANNER_LOOP_BUDGET_MS:-}
+  PLANNER_LOOP_MAX_ITERS_COMPLEX: ${PLANNER_LOOP_MAX_ITERS_COMPLEX:-3}
+  PLANNER_LOOP_BUDGET_MS_COMPLEX: ${PLANNER_LOOP_BUDGET_MS_COMPLEX:-12000}
+  # M2 P2 重复副作用防抖 / M2 P1 执行后对账：默认 on，off 各自回到 M2 前
+  PLANNER_DEDUP_SIDE_EFFECTS: ${PLANNER_DEDUP_SIDE_EFFECTS:-on}
+  VERIFY_OUTCOME: ${VERIFY_OUTCOME:-on}
+  VERIFY_MIRROR_STALE_S: ${VERIFY_MIRROR_STALE_S:-180}
+  # 规划失败/预筛保护的全局兜底 Agent（R2.1 P5：去 planning/context 硬编码 chitchat）
+  PLANNER_FALLBACK_AGENT: ${PLANNER_FALLBACK_AGENT:-chitchat}
+  # R3.2 服务间 mTLS：全 env 门控，默认关（GRPC_TLS 未设/off = insecure，逐字保持现状）。
+  GRPC_TLS: ${GRPC_TLS:-off}
+  GRPC_TLS_CA: /certs/ca.crt
+  GRPC_TLS_CERT: /certs/server.crt
+  GRPC_TLS_KEY: /certs/server.key
+  GRPC_TLS_SERVER_NAME: ${GRPC_TLS_SERVER_NAME:-cockpit-mesh}
+  # B3 §2.4 Registry 静态 admission：Agent 注册时携带的自身 token。
+  # 留空=不带（admission 默认关时无影响）。
+  AGENT_REGISTRY_TOKEN: ${AGENT_REGISTRY_TOKEN:-}
+  # badcase 排查（obs.turn/obs.llm/obs.log）：内容级采集门控（量产必须 off）与日志上报门槛
+  OBS_CONTENT_CAPTURE: ${OBS_CONTENT_CAPTURE:-on}
+  LOG_SHIP_LEVEL: ${LOG_SHIP_LEVEL:-WARNING}
+
+# 生存性：所有长驻服务 crash/OOM 后自动拉起（演示/长跑不因单点退出而中断）。
+# unless-stopped = 除非人工 stop，否则始终重启（含 docker daemon 重启后）。
+# 顺带全栈日志轮转（借同一 anchor 零逐服务改动）：json-file 无上限会让长跑演示机
+# 磁盘无限膨胀；观测日志已进 collector SQLite，容器 stdout 只留近期窗口。
+x-restart: &restart
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+# R3.2 mTLS 证书挂载：无条件挂到 gRPC mesh 服务（GRPC_TLS 关时代码不读、无害）。
+# 源 ../certs（相对 deploy/ 项目目录=仓库根 certs），由本地证书生成流程产出、gitignore。
+x-certs-vol: &certs-vol
+  - ../certs:/certs:ro
+
+services:
+  # ── 基础设施 ──
+  redis:
+    <<: *restart
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 1s
+      retries: 10
+
+  nats:
+    <<: *restart
+    image: nats:2-alpine
+    command: ["-js", "-m", "8222"]
+    ports: ["4222:4222"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
+      interval: 2s
+      timeout: 1s
+      retries: 10
+
+  postgres:
+    <<: *restart
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: cockpit
+      # B3：口令抽成 env（dev 缺省 cockpit=逐字现状，prod 必须覆盖，见 profile 强制表第 8 项）。
+      # 改这个值时**下面所有 POSTGRES_DSN 会跟着变**（同一个 ${POSTGRES_PASSWORD}），
+      # 但根 .env 里若另有一行写死口令的 POSTGRES_DSN，宿主侧脚本仍会用旧值——
+      # 强制表第 8 项同时校验 DSN 不内嵌默认口令，就是为了挡这个不一致。
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cockpit}
+      POSTGRES_DB: cockpit
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cockpit -d cockpit"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  # ws8 P1: HTTP 代理（网络白名单）——third-party Agent 出站 HTTP 经此代理
+  http-proxy:
+    <<: *restart
+    # 第三方 Agent 出站正向代理（CONNECT 隧道 + 域名白名单默认拒绝）。原 envoy 配置是反向代理、
+    # 不支持 HTTPS CONNECT，作 HTTP_PROXY 用时全失败 → 改用 deploy/egress-proxy.py（纯 stdlib，
+    # 跑在已有 python:3.11-slim，不引新镜像）。envoy-proxy.yaml 留作历史参考。见设计文档 §11。
+    image: python:3.11-slim
+    volumes:
+      - ./egress-proxy.py:/app/egress-proxy.py:ro
+    environment:
+      # 出站白名单：仅已接入的可信厂商域名（新增真实 provider 时在此追加）
+      EGRESS_ALLOW: "restapi.amap.com,devapi.qweather.com,api.tushare.pro,serpapi.com,api.anysearch.com,openapi.alipay.com,openapi-sandbox.dl.alipaydev.com,api.mch.weixin.qq.com,mcp.mcd.cn,gwmcp.lkcoffee.com"
+    command: ["python", "/app/egress-proxy.py"]
+    ports: ["8082:8080"]
+
+  # ── 云侧核心 ──
+  registry:
+    <<: *restart
+    build: { context: .., dockerfile: registry/Dockerfile }
+    volumes: *certs-vol
+    environment:
+      # B3 部署形态闸。**本服务没有 <<: *python-env**（它自己列 env），所以要单列——
+      # 「写在 anchor 里」不等于「每个服务都有」，这一条是容器演练当场抓出来的。
+      DEPLOY_PROFILE: ${DEPLOY_PROFILE:-dev}
+      NATS_URL: nats://nats:4222
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      POSTGRES_DSN: postgresql://cockpit:${POSTGRES_PASSWORD:-cockpit}@postgres:5432/cockpit
+      # R4.1 P0 语义路由：capability 向量 embedding 经 llm-gateway（→百炼 text-embedding-v4，
+      # 与 memory 同源），维度须与 LLM_EMBED_DIMENSIONS 一致。不加 depends_on llm-gateway：
+      # 启动时序由 store 的按需重探兜底（无 embed 源时诚实降级关键词路径）。
+      LLM_GATEWAY_ADDR: llm-gateway:50052
+      LLM_EMBED_DIMENSIONS: ${LLM_EMBED_DIMENSIONS:-1024}
+      # 长期不健康自动剔除：连续探测失败达此值（5s/轮 ≈ 10 分钟）整体注销，改名/下线
+      # 残留（如 food-ordering→nearby）不再永生刷告警；活 Agent 10s 重注册自动豁免。0=禁用
+      REGISTRY_EVICT_FAIL_COUNT: ${REGISTRY_EVICT_FAIL_COUNT:-120}
+      # B3 §2.4 静态 admission（token→agent_id 绑定）。缺省空=关闭，Register 行为逐字如前。
+      REGISTRY_ADMISSION_TOKENS: ${REGISTRY_ADMISSION_TOKENS:-}
+      # R3.2 服务间 mTLS（默认关）
+      GRPC_TLS: ${GRPC_TLS:-off}
+      GRPC_TLS_CA: /certs/ca.crt
+      GRPC_TLS_CERT: /certs/server.crt
+      GRPC_TLS_KEY: /certs/server.key
+      GRPC_TLS_SERVER_NAME: ${GRPC_TLS_SERVER_NAME:-cockpit-mesh}
+    ports: ["50051:50051"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('127.0.0.1',50051),2); s.close()"]
+      interval: 2s
+      timeout: 3s
+      retries: 90
+    depends_on:
+      nats:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    # P1 多实例：replicas: 2（PostgreSQL UPSERT 天然幂等，多实例写同一行安全）
+    deploy:
+      replicas: ${REGISTRY_REPLICAS:-1}
+
+  llm-gateway:
+    <<: *restart
+    build:
+      context: ..
+      dockerfile: llm-gateway/Dockerfile
+      additional_contexts:
+        runtime_models: ${CAR_AGENT_MODELS_ROOT:-../models}
+    volumes: *certs-vol
+    environment:
+      <<: *python-env
+      # Destructive memory HTTP ingress resolves Bearer -> owner with the same
+      # static identity table as edge-gateway. Empty/missing always rejects.
+      AUTH_TOKENS: ${AUTH_TOKENS:-}
+      AUTH_DEFAULT_USER_ID: ${AUTH_DEFAULT_USER_ID:-u1}
+      E2E_IDENTITY_ENABLED: ${E2E_IDENTITY_ENABLED:-false}
+      E2E_IDENTITY_SECRET: ${E2E_IDENTITY_SECRET-}
+      LLM_PROVIDER: ${LLM_PROVIDER:-xiaomimimo}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      # OpenAI 兼容服务商可切换端点/鉴权/思考开关，换服务商只改 .env（详见 .env.example）
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_AUTH_STYLE: ${LLM_AUTH_STYLE:-api-key}
+      LLM_DISABLE_THINKING: ${LLM_DISABLE_THINKING:-true}
+      LLM_MODEL_PRIMARY: ${LLM_MODEL_PRIMARY:-mimo-v2.5-pro}
+      LLM_MODEL_FALLBACK: ${LLM_MODEL_FALLBACK:-mimo-v2.5}
+      # 跨厂商备份档（provider[:model]）：active 厂商整链（含 429）耗尽后兜底一跳。
+      # pinned 请求恒不跨（pin=不许漂移）；空=关（行为与今天逐字一致）。
+      LLM_BACKUP: ${LLM_BACKUP:-}
+      # 多 LLM 源（HMI 设置页两级切换：厂商→模型，全局生效，默认 LLM_PROVIDER）：每家填 key 即出现在
+      # 切换入口（未填置灰）。qwen(阿里百炼) 复用下面的 LLM_EMBED_API_KEY/DASHSCOPE_ASR_KEY，无需单独 key。
+      MINIMAX_API_KEY: ${MINIMAX_API_KEY:-}
+      MINIMAX_LLM_MODEL: ${MINIMAX_LLM_MODEL:-MiniMax-M3}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_MODEL_PRIMARY: ${DEEPSEEK_MODEL_PRIMARY:-deepseek-v4-pro}
+      DEEPSEEK_MODEL_FAST: ${DEEPSEEK_MODEL_FAST:-deepseek-v4-flash}
+      DASHSCOPE_LLM_KEY: ${DASHSCOPE_LLM_KEY:-}
+      QWEN_MODEL_PRIMARY: ${QWEN_MODEL_PRIMARY:-qwen3.7-max}
+      QWEN_MODEL_FAST: ${QWEN_MODEL_FAST:-qwen3.7-plus}
+      # T3.5 e2e_degrade.py 测试钩子：MockProvider 人为延迟（ms），默认 0=零行为变化；
+      # 仅该脚本「LLM 超时」用例会用 shell env 临时覆盖调大（不写入 .env，沿用
+      # e2e_auth.py 已确立的"临时 env 覆盖，不改 .env"惯例）。
+      LLM_MOCK_DELAY_MS: ${LLM_MOCK_DELAY_MS:-0}
+      # Embedding（记忆语义检索）：默认阿里云百炼 text-embedding-v4（1024 维）。
+      # 仅需在根 .env 填 LLM_EMBED_API_KEY=<百炼 key>；其余有默认值。
+      LLM_EMBED_URL: ${LLM_EMBED_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings}
+      LLM_EMBED_MODEL: ${LLM_EMBED_MODEL:-text-embedding-v4}
+      LLM_EMBED_API_KEY: ${LLM_EMBED_API_KEY:-}
+      LLM_EMBED_AUTH_STYLE: ${LLM_EMBED_AUTH_STYLE:-bearer}
+      LLM_EMBED_DIMENSIONS: ${LLM_EMBED_DIMENSIONS:-1024}
+      # 流式 ASR（实时识别上屏）：dashscope（OpenAI Realtime，默认，复用百炼 LLM_EMBED_API_KEY）| mimo-chunked | off
+      ASR_STREAM_PROVIDER: ${ASR_STREAM_PROVIDER:-dashscope}
+      DASHSCOPE_ASR_KEY: ${DASHSCOPE_ASR_KEY:-}
+      DASHSCOPE_ASR_WS_URL: ${DASHSCOPE_ASR_WS_URL:-wss://dashscope.aliyuncs.com/api-ws/v1/realtime}
+      DASHSCOPE_ASR_INFERENCE_WS_URL: ${DASHSCOPE_ASR_INFERENCE_WS_URL:-wss://dashscope.aliyuncs.com/api-ws/v1/inference}
+      ASR_STREAM_MODEL: ${ASR_STREAM_MODEL:-qwen3-asr-flash-realtime-2026-02-10}
+      ASR_MODEL: ${ASR_MODEL:-mimo-v2.5-asr}
+      # M4 S2S / P4 声纹 / P4 视觉的运行期旋钮。**必须在这里显式列名**——
+      # 根 compose 的 `env_file` 只作用于变量插值，不会把 .env 自动注入容器；
+      # 不列名的话 `.env.example` 里写的「S2S_PROVIDER=off 一键停用」根本不生效
+      # （2026-07-26 洁癖盘点发现的上批欠账）。留空一律回落代码内默认。
+      S2S_PROVIDER: ${S2S_PROVIDER:-}
+      S2S_MODEL: ${S2S_MODEL:-}
+      S2S_API_KEY: ${S2S_API_KEY:-}
+      S2S_WS_URL: ${S2S_WS_URL:-}
+      S2S_VAD_SILENCE_MS: ${S2S_VAD_SILENCE_MS:-}
+      S2S_VAD_THRESHOLD: ${S2S_VAD_THRESHOLD:-}
+      S2S_SESSION_MAX_TURNS: ${S2S_SESSION_MAX_TURNS:-}
+      S2S_TURN_TIMEOUT_S: ${S2S_TURN_TIMEOUT_S:-}
+      S2S_ESCALATE_DESC: ${S2S_ESCALATE_DESC:-}
+      S2S_PERSONA: ${S2S_PERSONA:-}
+      VOICEPRINT_PROVIDER: ${VOICEPRINT_PROVIDER:-}
+      VOICEPRINT_MODEL_PATH: ${VOICEPRINT_MODEL_PATH:-}
+      VOICEPRINT_MIN_SPEECH_MS: ${VOICEPRINT_MIN_SPEECH_MS:-}
+      VOICEPRINT_THREADS: ${VOICEPRINT_THREADS:-}
+      VISION_PROVIDER: ${VISION_PROVIDER:-}
+      VISION_MODEL: ${VISION_MODEL:-}
+      VISION_MODEL_FALLBACK: ${VISION_MODEL_FALLBACK:-}
+      VISION_FRAME_TTL_S: ${VISION_FRAME_TTL_S:-}
+      VISION_FRAME_MAX: ${VISION_FRAME_MAX:-}
+      VISION_FRAME_MAX_BYTES: ${VISION_FRAME_MAX_BYTES:-}
+      AUDIO_HTTP_PORT: "50059"
+      # 批处理 ASR/TTS 引擎（/api/asr、/api/tts + gRPC 面，启动时装配）：auto=LLM_PROVIDER 为
+      # MiMo 系→MiMo，否则桥接对应流式引擎（不用 MiMo 时批处理不再哑成 mock）。
+      # 可显式钉：ASR_PROVIDER=mimo|dashscope|mock；TTS_PROVIDER=mimo|cosyvoice|qwen|minimax|mock
+      ASR_PROVIDER: ${ASR_PROVIDER:-auto}
+      TTS_PROVIDER: ${TTS_PROVIDER:-auto}
+      TTS_MODEL: ${TTS_MODEL:-mimo-v2.5-tts}
+      # MiMo 音频端点（批/流式 ASR/TTS 共用；与 chat 的 LLM_BASE_URL 独立），空=官方集群
+      MIMO_AUDIO_BASE_URL: ${MIMO_AUDIO_BASE_URL:-}
+      TTS_VOICE_ID: ${TTS_VOICE_ID:-冰糖}
+      # 流式 TTS（服务端 PCM 流式合成，R4.2）：cosyvoice（run-task，默认，复用百炼 key）| qwen（realtime，含方言）
+      #   | mimo（MiMo v2.5 流式，复用 LLM_API_KEY）| minimax（T2A 流式，复用 MINIMAX_API_KEY）| mock | off
+      TTS_STREAM_PROVIDER: ${TTS_STREAM_PROVIDER:-cosyvoice}
+      TTS_STREAM_MODEL: ${TTS_STREAM_MODEL:-}
+      TTS_STREAM_VOICE: ${TTS_STREAM_VOICE:-}
+      DASHSCOPE_TTS_INFERENCE_WS_URL: ${DASHSCOPE_TTS_INFERENCE_WS_URL:-wss://dashscope.aliyuncs.com/api-ws/v1/inference}
+      DASHSCOPE_TTS_REALTIME_WS_URL: ${DASHSCOPE_TTS_REALTIME_WS_URL:-wss://dashscope.aliyuncs.com/api-ws/v1/realtime}
+      # MiniMax TTS（与 MiniMax LLM 同 MINIMAX_API_KEY）：模型/默认音色/T2A 端点
+      MINIMAX_TTS_MODEL: ${MINIMAX_TTS_MODEL:-speech-2.8-turbo}
+      MINIMAX_TTS_VOICE: ${MINIMAX_TTS_VOICE:-female-tianmei}
+      MINIMAX_T2A_URL: ${MINIMAX_T2A_URL:-https://api.minimaxi.com/v1/t2a_v2}
+    ports: ["50052:50052", "50059:50059"]
+    depends_on: [redis]
+
+  memory:
+    <<: *restart
+    build: { context: .., dockerfile: memory/Dockerfile }
+    volumes: *certs-vol
+    environment:
+      <<: *python-env
+      POSTGRES_DSN: postgresql://cockpit:${POSTGRES_PASSWORD:-cockpit}@postgres:5432/cockpit
+      EMBED_DIM: ${EMBED_DIM:-1024}   # 须与 LLM_EMBED_DIMENSIONS 一致（百炼 v4 默认 1024）
+      # 合成会话（含旧 memtest- 客户端标记）按 session_id 前缀跳过 LLM 抽取巩固；
+      # 只有 runner 签发、经专用字段传递且绑定 run/user/session 的短时 memory capability
+      # 可绕过；capability 不是业务 session_id（相关 legacy wire 名称仅为兼容保留）。
+      MEMORY_EXTRACT_SKIP_PREFIXES: ${MEMORY_EXTRACT_SKIP_PREFIXES:-eval-,e2e-,ctxe2e-,central-,review-,nightly-,replay-,probe-,smoke-,memtest-}
+      E2E_CAPABILITY_ENABLED: ${E2E_CAPABILITY_ENABLED:-false}
+      E2E_CAPABILITY_SECRET: ${E2E_CAPABILITY_SECRET-}
+      # M2 记忆图谱：偏好加权（off=逐字回加权前）
+      MEMORY_WEIGHTING: ${MEMORY_WEIGHTING:-on}
+      # 会话原文 TTL（验收补口）：留空用代码默认 7 天；ForgetUser 全量删级联清会话原文
+      MEMORY_SESSION_TTL_S: ${MEMORY_SESSION_TTL_S:-}
+      # M4 P4 声纹判定阈值（判定在 memory 侧，模板在这儿）。**留空一律用代码内默认**——
+      # 阈值由声纹探针实测标定，改动前先复标。
+      VOICEPRINT_THRESHOLD: ${VOICEPRINT_THRESHOLD:-}
+      VOICEPRINT_MARGIN: ${VOICEPRINT_MARGIN:-}
+      VOICEPRINT_MIN_CONSISTENCY: ${VOICEPRINT_MIN_CONSISTENCY:-}
+    ports: ["50053:50053"]
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  cloud-planner:
+    <<: *restart
+    build: { context: .., dockerfile: orchestrator/cloud/Dockerfile }
+    volumes:
+      - ../certs:/certs:ro
+      # skills/ 只读挂载（2026-07-27 评审缺口 5）：让「加规划知识=投 skill 文件」在容器里
+      # 真实成立——mtime 热更新（30s 窗）直接感知仓库文件变化，投文件/合并 evolve 提案后
+      # 不再需要重建镜像。镜像内仍 COPY 一份（挂载缺席时自持，行为不变）。
+      - ${CAR_AGENT_SKILLS_ROOT:-../skills}:/app/skills:ro
+    environment:
+      <<: *python-env
+      # R4.4 拒识/澄清门控：REJECT 默认 on（作用域被 hands-free + input_source 双重限定，
+      # 显式输入永不拒）；CLARIFY 默认 on（2026-07-08 真栈 CDP 全流程验收通过后翻 on：歧义句出卡
+      # →点选消歧指令派发→深度=1 不再澄清；反例误澄清 0/17）；FALLBACK_MIN = 语义 top-1 分数门槛。
+      REJECT_NON_ADDRESSED: ${REJECT_NON_ADDRESSED:-on}
+      CLARIFY_ENABLED: ${CLARIFY_ENABLED:-on}
+      CLARIFY_FALLBACK_MIN: ${CLARIFY_FALLBACK_MIN:-0.5}
+      # M0b Skill 层：full|canary|shadow|off（默认 full=注入——Full Migration 后中央 base
+      # 不含领域知识，shadow/off 仅作研究/debug 档，会缺规划知识）
+      SKILLS_MODE: ${SKILLS_MODE:-full}
+      # Skill 检索双通道（2026-07-26）：hybrid=词法∪语义预筛（经 llm-gateway Embed，
+      # fail-open 回词法）｜lexical=纯词法回退档。
+      SKILLS_RETRIEVAL: ${SKILLS_RETRIEVAL:-hybrid}
+      # Skill 调优项透传（2026-07-27 评审缺口 5：.env 可调但容器收不到）。刻意 ${VAR:-}
+      # 不带默认值——默认值只活在 skills.py 一处（.env.example 活跃行压死代码默认的老教训），
+      # 未设置时容器收到空串、代码侧 `or` 兜底。
+      SKILL_SEM_THRESHOLD: ${SKILL_SEM_THRESHOLD:-}
+      SKILL_EMBED_TIMEOUT: ${SKILL_EMBED_TIMEOUT:-}
+      SKILL_BUDGET: ${SKILL_BUDGET:-}
+      SKILL_TOP_K: ${SKILL_TOP_K:-}
+      SKILL_MIN_SCORE: ${SKILL_MIN_SCORE:-}
+      # M5 P1 范例库（第三通道，最软层）：full=注入｜shadow=只检索记录（A/B）｜off=关。
+      # 语料同走上面的 skills/ 只读挂载——投范例文件 30s 内生效。调优项同样 ${VAR:-}
+      # 空默认透传（默认值只活在 exemplars.py 一处）。
+      EXEMPLARS_MODE: ${EXEMPLARS_MODE:-full}
+      EXEMPLARS_RETRIEVAL: ${EXEMPLARS_RETRIEVAL:-hybrid}
+      EXEMPLAR_LEX_THRESHOLD: ${EXEMPLAR_LEX_THRESHOLD:-}
+      EXEMPLAR_SEM_THRESHOLD: ${EXEMPLAR_SEM_THRESHOLD:-}
+      EXEMPLAR_EMBED_TIMEOUT: ${EXEMPLAR_EMBED_TIMEOUT:-}
+      EXEMPLAR_BUDGET: ${EXEMPLAR_BUDGET:-}
+      EXEMPLAR_TOP_K: ${EXEMPLAR_TOP_K:-}
+      # M1a submit_plan 结构化规划输出：on|off（默认 on——2026-07-24 泓舟拍板翻正，
+      # A/B 材料 RFC §11；off=JSON 纯文本回退档。规划轮经原生 function calling 强制
+      # 输出合法 Plan，协议失败轮内回退 JSON 路径）
+      PLANNER_TOOLCALL: ${PLANNER_TOOLCALL:-on}
+      # 掉出工具通道后是否再要一次工具通道：on|off（默认 on——泓舟 2026-08-10 拍板，
+      # findings §23/§24；只管「模型能说话但没用工具」，协议异常仍退 JSON 档）
+      PLANNER_TOOLCALL_SALVAGE_RETRY: ${PLANNER_TOOLCALL_SALVAGE_RETRY:-on}
+    ports: ["50054:50054"]
+    depends_on:
+      registry:
+        condition: service_healthy
+      llm-gateway:
+        condition: service_started
+      memory:
+        condition: service_started
+      redis:
+        condition: service_healthy
+
+  payment-gateway:
+    <<: *restart
+    build: { context: .., dockerfile: payment-gateway/Dockerfile }
+    volumes: *certs-vol
+    environment:
+      <<: *python-env
+      PAYMENT_PORT: "50071"
+      # ── 支付渠道（契约 §9.17）。渠道凭证**只注入本服务**（Agent 不持凭证红线）；
+      # 出站经 http-proxy 白名单代理（支付宝/微信域名已放行）。
+      PAYMENT_VENDOR: ${PAYMENT_VENDOR:-mock}
+      PAYMENT_DEFAULT_CHANNEL: ${PAYMENT_DEFAULT_CHANNEL:-alipay}
+      # 真渠道场景白名单，默认空=全 mock（fail-closed：防 mock 数据金额走真渠道收真钱）
+      PAYMENT_REAL_SCENES: ${PAYMENT_REAL_SCENES:-}
+      PAYMENT_MAX_AMOUNT_FEN: ${PAYMENT_MAX_AMOUNT_FEN:-20000}
+      PAYMENT_QR_EXPIRE_S: ${PAYMENT_QR_EXPIRE_S:-300}
+      PAYMENT_MERCHANT_EXPIRE_S: ${PAYMENT_MERCHANT_EXPIRE_S:-1800}
+      PAYMENT_MOCK_AUTOPAY_S: ${PAYMENT_MOCK_AUTOPAY_S:-8}
+      PAYMENT_EXTERNAL_PAY_HOSTS: ${PAYMENT_EXTERNAL_PAY_HOSTS:-}
+      ALIPAY_APP_ID: ${ALIPAY_APP_ID:-}
+      ALIPAY_APP_PRIVATE_KEY: ${ALIPAY_APP_PRIVATE_KEY:-}
+      ALIPAY_PUBLIC_KEY: ${ALIPAY_PUBLIC_KEY:-}
+      ALIPAY_GATEWAY: ${ALIPAY_GATEWAY:-}
+      WECHATPAY_MCHID: ${WECHATPAY_MCHID:-}
+      WECHATPAY_MCH_SERIAL: ${WECHATPAY_MCH_SERIAL:-}
+      WECHATPAY_MCH_PRIVATE_KEY: ${WECHATPAY_MCH_PRIVATE_KEY:-}
+      WECHATPAY_APIV3_KEY: ${WECHATPAY_APIV3_KEY:-}
+      WECHATPAY_APP_ID: ${WECHATPAY_APP_ID:-}
+      WECHATPAY_PUBLIC_KEY: ${WECHATPAY_PUBLIC_KEY:-}
+      WECHATPAY_PUBLIC_KEY_ID: ${WECHATPAY_PUBLIC_KEY_ID:-}
+      HTTP_PROXY: http://http-proxy:8080
+      HTTPS_PROXY: http://http-proxy:8080
+      # gRPC 内网互联不走代理（nearby 先例：proxy 与 gRPC 并存的解法）
+      NO_PROXY: "redis,nats,registry,localhost,127.0.0.1"
+      no_proxy: "redis,nats,registry,localhost,127.0.0.1"
+    ports: ["50071:50071"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('127.0.0.1',50071),2); s.close()"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+    depends_on:
+      redis:
+        condition: service_healthy
+      http-proxy:
+        condition: service_started
+    # 唯一持支付凭证的服务，加固不低于 third_party Agent 沙箱（ws8 P1 同款四件套）
+    read_only: true
+    security_opt: [no-new-privileges]
+    mem_limit: 256m
+    cpus: 0.5
+
+  # ── Agents ──
+  navigation-agent:
+    <<: *restart
+    build: { context: .., dockerfile: agents/navigation/Dockerfile }
+    volumes: *certs-vol
+    environment:
+      <<: *python-env
+      AGENT_PORT: "50061"
+      # 真实 POI provider（高德）；不配 key 走 mock。key 只注入本服务（最小化）。
+      POI_VENDOR: ${POI_VENDOR:-mock}
+      AMAP_KEY: ${AMAP_KEY:-}
+    depends_on:
+      registry:
+        condition: service_healthy
+      llm-gateway:
+        condition: service_started
+
+  chitchat-agent:
+    <<: *restart
+    build: { context: .., dockerfile: agents/chitchat/Dockerfile }
+    volumes: *certs-vol
+    environment:
+      <<: *python-env
+      AGENT_PORT: "50062"
+    depends_on:
+      registry:
+        condition: service_healthy
+      llm-gateway:
+        condition: service_started
+
+  nearby-agent:
+    <<: *restart
+    build: { context: .., dockerfile: agents/nearby/Dockerfile }
+    volumes: *certs-vol
+    environment:
+      <<: *python-env
+      AGENT_PORT: "50063"
+      # 真实周边 provider（高德 POI 2.0）；不配 key 走 mock。key 只注入本服务（最小化）。
+      # 出站经 http-proxy 正向代理（CONNECT + 域名白名单，见 deploy/egress-proxy.py）：第三方
+      # Agent 只能访问白名单厂商域名（restapi.amap.com 已放行），越权域名被 403。
+      POI_VENDOR: ${POI_VENDOR:-mock}
+      AMAP_KEY: ${AMAP_KEY:-}
+      HTTP_PROXY: http://http-proxy:8080
+      HTTPS_PROXY: http://http-proxy:8080
+    depends_on:
+      registry:
+        condition: service_healthy
+      llm-gateway:
+        condition: service_started
+      memory:
+        condition: service_started
+      http-proxy:
+        condition: service_started
+    # ws8 P1: third-party Agent 沙箱（资源限制 + 只读文件系统 + no-new-privileges + 出站白名单代理）
+    read_only: true
+    security_opt: [no-new-privileges]
+    mem_limit: 256m
+    cpus: 0.5
+
+  parking-payment-agent:
+    <<: *restart
+    build: { context: .., dockerfile: agents/parking_payment/Dockerfile }
+    volumes: *certs-vol
+    environment:
+      <<: *python-env
+      AGENT_PORT: "50064"
+      HTTP_PROXY: http://http-proxy:8080
+      HTTPS_PROXY: http://http-proxy:8080
+      # 缴费经 payment-gateway（§9.17）：gRPC 内网走 NO_PROXY 直连
+      NO_PROXY: "redis,nats,registry,llm-gateway,memory,cloud-planner,payment-gateway,localhost,127.0.0.1"
+      no_proxy: "redis,nats,registry,llm-gateway,memory,cloud-planner,payment-gateway,localhost,127.0.0.1"
+    depends_on:
+      registry:
+        condition: service_healthy
+      llm-gateway:
+        condition: service_started
+      memory:
+        condition: service_started
+      http-proxy:
+        condition: service_started
+      payment-gateway:
+        condition: service_healthy
+    # ws8 P1: third-party Agent 沙箱
+    read_only: true
+    security_opt: [no-new-privileges]
+    mem_limit: 256m
+    cpus: 0.5
+
+  manual-rag-agent:
+    <<: *restart
+    build: { context: .., dockerfile: agents/manual_rag/Dockerfile }
+    volumes: *certs-vol
+    environment:
+      <<: *python-env
+      AGENT_PORT: "50065"
+      # 默认 mock 保持 CI/无私有资产开发可启动；验收/生产显式 local，缺索引即 fail-fast。
+      KNOWLEDGE_VENDOR: ${KNOWLEDGE_VENDOR:-mock}
+      MANUAL_INDEX_PATH: ${MANUAL_INDEX_PATH:-/app/models/manual_rag/xiaomi-su7-2024.v2.mrag}
+      KNOWLEDGE_VEHICLE_MODEL: ${KNOWLEDGE_VEHICLE_MODEL:-}
+    depends_on:
+      registry:
+        condition: service_healthy
+      llm-gateway:
+        condition: service_started
+
+  trip-planner-agent:
+    <<: *restart
+    build: { context: .., dockerfile: agents/trip_planner/Dockerfile }
+    volumes: *certs-vol
+    environment:
+      <<: *python-env
+      AGENT_PORT: "50066"
+      # 进程内复用导航高德 provider：接地景点 POI、算 leg 路线、按 SoC 搜沿途充电站；不配走 mock。
+      POI_VENDOR: ${POI_VENDOR:-mock}
+      AMAP_KEY: ${AMAP_KEY:-}
+      # 天气联动（#3）：进程内复用 info 和风 provider 结合目的地预报规划；不配走 mock（天气优雅缺省）。
+      WEATHER_VENDOR: ${WEATHER_VENDOR:-mock}
+      QWEATHER_HOST: ${QWEATHER_HOST:-devapi.qweather.com}
+      QWEATHER_PROJECT_ID: ${QWEATHER_PROJECT_ID:-}
+      QWEATHER_KEY_ID: ${QWEATHER_KEY_ID:-}
+      QWEATHER_PRIVATE_KEY: ${QWEATHER_PRIVATE_KEY:-}
+      QWEATHER_PRIVATE_KEY_PATH: ${QWEATHER_PRIVATE_KEY_PATH:-}
+      QWEATHER_KEY: ${QWEATHER_KEY:-}
+    depends_on:
+      registry:
+        condition: service_healthy
+      llm-gateway:
+        condition: service_started
+
+  info-agent:
+    <<: *restart
+    build: { context: .., dockerfile: agents/info/Dockerfile }
+    volumes: *certs-vol
+    environment:
+      <<: *python-env
+      AGENT_PORT: "50067"
+      # 真实天气 provider（和风）；不配走 mock。鉴权 JWT 优先，否则 API Key。凭证只注入本服务。
+      WEATHER_VENDOR: ${WEATHER_VENDOR:-mock}
+      QWEATHER_HOST: ${QWEATHER_HOST:-devapi.qweather.com}
+      QWEATHER_PROJECT_ID: ${QWEATHER_PROJECT_ID:-}
+      QWEATHER_KEY_ID: ${QWEATHER_KEY_ID:-}
+      QWEATHER_PRIVATE_KEY: ${QWEATHER_PRIVATE_KEY:-}
+      QWEATHER_PRIVATE_KEY_PATH: ${QWEATHER_PRIVATE_KEY_PATH:-}
+      QWEATHER_KEY: ${QWEATHER_KEY:-}
+      # 仅用于把已授权定位坐标反查为天气卡可读地点；未配置时展示“当前位置”。
+      AMAP_KEY: ${AMAP_KEY:-}
+      # 联网搜索（优先 Exa 正文级检索，降级 AnySearch→Bing）；不配走 mock
+      EXA_API_KEY: ${EXA_API_KEY:-}
+      EXA_BASE_URL: ${EXA_BASE_URL:-https://api.exa.ai}
+      ANYSEARCH_API_KEY: ${ANYSEARCH_API_KEY:-}
+      ANYSEARCH_BASE_URL: ${ANYSEARCH_BASE_URL:-https://api.anysearch.com}
+      BING_SEARCH_KEY: ${BING_SEARCH_KEY:-}
+      # 新闻（SerpApi: Google+Baidu News，AnySearch 兜底）；不配走 mock
+      SERPAPI_API_KEY: ${SERPAPI_API_KEY:-}
+      NEWS_API_KEY: ${NEWS_API_KEY:-}
+      # 赛事（api-football：实时比分/赛程，league=1 世界杯）；不配走 mock
+      API_FOOTBALL_KEY: ${API_FOOTBALL_KEY:-}
+      API_FOOTBALL_HOST: ${API_FOOTBALL_HOST:-v3.football.api-sports.io}
+      # 股票行情（Tushare 免费 API）；不配走 mock
+      TUSHARE_TOKEN: ${TUSHARE_TOKEN:-}
+      STOCK_API_KEY: ${STOCK_API_KEY:-}
+    # JWT 用文件私钥时取消下面注释，把宿主机 PEM 挂进容器（路径与 QWEATHER_PRIVATE_KEY_PATH 一致）：
+    # volumes:
+    #   - ${QWEATHER_PRIVATE_KEY_PATH}:${QWEATHER_PRIVATE_KEY_PATH}:ro
+    depends_on:
+      registry:
+        condition: service_healthy
+      llm-gateway:
+        condition: service_started
+
+  deep-research-agent:
+    <<: *restart
+    build: { context: .., dockerfile: agents/deep_research/Dockerfile }
+    volumes: *certs-vol
+    environment:
+      <<: *python-env
+      AGENT_PORT: "50073"
+      # 进程内复用 info 的搜索 provider（Exa 正文级→AnySearch→Bing→mock）做有界迭代检索；不配走 mock
+      EXA_API_KEY: ${EXA_API_KEY:-}
+      EXA_BASE_URL: ${EXA_BASE_URL:-https://api.exa.ai}
+      ANYSEARCH_API_KEY: ${ANYSEARCH_API_KEY:-}
+      ANYSEARCH_BASE_URL: ${ANYSEARCH_BASE_URL:-https://api.anysearch.com}
+      BING_SEARCH_KEY: ${BING_SEARCH_KEY:-}
+      # M2 P0 Task Ledger：后台异步深调研的持久任务账本（可查询/可取消/可诚实报告中断）。
+      # 无 PG → 账本静默禁用，异步调研仍照跑，只是受理话术不承诺可停可问。
+      POSTGRES_DSN: postgresql://cockpit:${POSTGRES_PASSWORD:-cockpit}@postgres:5432/cockpit
+      LEDGER_ORPHAN_TTL_S: ${LEDGER_ORPHAN_TTL_S:-90}
+      RESEARCH_TASK_DEADLINE_S: ${RESEARCH_TASK_DEADLINE_S:-900}
+      RESEARCH_TASK_LLM_MAX: ${RESEARCH_TASK_LLM_MAX:-6}
+      RESEARCH_TASK_EXT_MAX: ${RESEARCH_TASK_EXT_MAX:-40}
+    depends_on:
+      registry:
+        condition: service_healthy
+      llm-gateway:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+
+  reminder-agent:
+    <<: *restart
+    build: { context: .., dockerfile: agents/reminder/Dockerfile }
+    volumes: *certs-vol
+    environment:
+      <<: *python-env
+      AGENT_PORT: "50074"
+      # PG 持久 + 到点调度（无 PG 内存降级重启丢失；无 NATS 仅日志不推送）
+      POSTGRES_DSN: postgresql://cockpit:${POSTGRES_PASSWORD:-cockpit}@postgres:5432/cockpit
+      REMINDER_POLL_S: ${REMINDER_POLL_S:-5}
+      REMINDER_TZ: ${REMINDER_TZ:-Asia/Shanghai}
+    depends_on:
+      registry:
+        condition: service_healthy
+      llm-gateway:
+        condition: service_started
+      memory:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+
+  charging-planner-agent:
+    <<: *restart
+    build: { context: .., dockerfile: agents/charging_planner/Dockerfile }
+    volumes: *certs-vol
+    environment:
+      <<: *python-env
+      AGENT_PORT: "50068"
+      # 高德：充电站 POI 搜索 + 路线距离/时长（真实充能规划）；不配走 mock
+      AMAP_KEY: ${AMAP_KEY:-}
+      # M3 P0 低电量主动建议：跌破阈值的**变沿**触发一次 + 生产侧节流防读数抖动
+      CHARGING_LOW_SOC: ${CHARGING_LOW_SOC:-20}
+      CHARGING_LOW_SOC_THROTTLE_S: ${CHARGING_LOW_SOC_THROTTLE_S:-1800}
+    depends_on:
+      registry:
+        condition: service_healthy
+      llm-gateway:
+        condition: service_started
+      memory:
+        condition: service_started
+      nats:
+        condition: service_healthy
+
+  scene-orchestrator-agent:
+    <<: *restart
+    build: { context: .., dockerfile: agents/scene_orchestrator/Dockerfile }
+    volumes: *certs-vol
+    environment:
+      <<: *python-env
+      AGENT_PORT: "50069"
+      # 用户自建场景 PG 持久（无 PG 内存降级、重启丢失）；车况镜像/主动建议走 NATS
+      # （无 NATS：退出场景改走反向默认表恢复，不影响激活主链路）
+      POSTGRES_DSN: postgresql://cockpit:${POSTGRES_PASSWORD:-cockpit}@postgres:5432/cockpit
+    depends_on:
+      registry:
+        condition: service_healthy
+      llm-gateway:
+        condition: service_started
+      memory:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+
+  road-safety-agent:
+    <<: *restart
+    build: { context: .., dockerfile: agents/road_safety/Dockerfile }
+    volumes: *certs-vol
+    environment:
+      <<: *python-env
+      AGENT_PORT: "50072"
+    depends_on:
+      registry:
+        condition: service_healthy
+      llm-gateway:
+        condition: service_started
+
+  # M4 P4 视觉入口：「那是什么」单帧图片问答。图像不进对话链——只传 frame_id，
+  # 网关从内存帧库取图拼多模态请求（契约见 docs/conventions.md §9.12）。
+  vision-agent:
+    <<: *restart
+    build: { context: .., dockerfile: agents/vision/Dockerfile }
+    volumes: *certs-vol
+    environment:
+      <<: *python-env
+      AGENT_PORT: "50077"
+      # 看图必须打到 VL 档：聊天大脑（如 qwen3.7-max）对多模态 content 直接 400，
+      # 而档位解析对不认识的模型是静默回落——留空即用 llm_runtime 的 qwen-vl 档默认。
+      VISION_PROVIDER: ${VISION_PROVIDER:-qwen-vl}
+      VISION_MODEL: ${VISION_MODEL:-}
+    depends_on:
+      registry:
+        condition: service_healthy
+      llm-gateway:
+        condition: service_started
+
+  observability-collector:
+    <<: *restart
+    build: { context: .., dockerfile: observability/collector/Dockerfile }
+    environment:
+      # collector 不建 gRPC server，profile 闸在 main.py 进程入口显式调（B3）。
+      DEPLOY_PROFILE: ${DEPLOY_PROFILE:-dev}
+      NATS_URL: nats://nats:4222
+      OBS_COLLECTOR_PORT: "8092"
+      DEBUG_VEHICLE_CONTROL: ${DEBUG_VEHICLE_CONTROL:-true}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # badcase 排查持久层：turns/spans/llm/logs 落 SQLite（named volume，重启不丢）
+      OBS_DB_PATH: /data/obs.db
+      OBS_RETENTION_DAYS: ${OBS_RETENTION_DAYS:-7}
+    volumes:
+      - obs-data:/data
+    ports: ["8092:8092"]
+    depends_on:
+      nats:
+        condition: service_healthy
+
+  # T3.6：Prometheus/Grafana 导出，profile 门控——默认 `docker compose up`/`make up` 不起，
+  # 需 `docker compose --profile observability up -d prometheus grafana` 显式启用。
+
+  dashboard:
+    <<: *restart
+    build: { context: .., dockerfile: dashboard/Dockerfile }
+    environment:
+      VITE_COLLECTOR_URL: http://localhost:8092
+      VITE_EDGE_GATEWAY_URL: http://localhost:8090
+    ports: ["5174:5174"]
+    depends_on: [observability-collector, edge-gateway]
+
+  prometheus:
+    <<: *restart
+    image: prom/prometheus:v3.13.0
+    profiles: ["observability"]
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports: ["9090:9090"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
+      interval: 5s
+      timeout: 2s
+      retries: 10
+    depends_on: [observability-collector]
+
+  grafana:
+    <<: *restart
+    image: grafana/grafana:12.3.8
+    profiles: ["observability"]
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports: ["3000:3000"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health || exit 1"]
+      interval: 5s
+      timeout: 2s
+      retries: 10
+    depends_on: [prometheus]
+
+  # ── 受控 MCP 桥（M3 P2）──
+  # 一个 Agent 承载 N 个 MCP server；接入永远是**人工准入**（agents/mcp_bridge/servers.yaml
+  # 的 allowlist + 版本锁定 + schema 指纹），不是动态放行。首批一读一写（演示商户）。
+  mcp-bridge:
+    <<: *restart
+    build: { context: .., dockerfile: agents/mcp_bridge/Dockerfile }
+    volumes: *certs-vol
+    environment:
+      <<: *python-env
+      AGENT_PORT: "50076"
+      NATS_URL: nats://nats:4222
+      E2E_NAMESPACE_ADMIN_ENABLED: ${E2E_NAMESPACE_ADMIN_ENABLED:-false}
+      E2E_NAMESPACE_ADMIN_SECRET: ${E2E_NAMESPACE_ADMIN_SECRET-}
+      # 写操作订单状态机复用 M2 task_ledger（不新建表）；无 PG → 诚实降级不承诺可查
+      POSTGRES_DSN: postgresql://cockpit:${POSTGRES_PASSWORD:-cockpit}@postgres:5432/cockpit
+      # 商户 MCP（§9.9 批 3）：远程端点出站经 http-proxy 白名单；会话 token 只注入
+      # 本服务（≠ 支付渠道凭证——那些只在 payment-gateway）。缺 token 该商户诚实缺席。
+      MCD_MCP_TOKEN: ${MCD_MCP_TOKEN:-}
+      LUCKIN_MCP_TOKEN: ${LUCKIN_MCP_TOKEN:-}
+      HTTP_PROXY: http://http-proxy:8080
+      HTTPS_PROXY: http://http-proxy:8080
+      NO_PROXY: "redis,nats,registry,llm-gateway,memory,cloud-planner,payment-gateway,postgres,localhost,127.0.0.1"
+      no_proxy: "redis,nats,registry,llm-gateway,memory,cloud-planner,payment-gateway,postgres,localhost,127.0.0.1"
+    depends_on:
+      registry:
+        condition: service_healthy
+      llm-gateway:
+        condition: service_started
+      memory:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      http-proxy:
+        condition: service_started
+
+  # ── 统一主动引擎（M3 P0）──
+  # 「该不该现在打扰驾驶员」的唯一裁决点：订 agent.proactive.request → 六道闸 + 合并窗口
+  # → 发既有 agent.proactive（网关与 HMI 零改动）。**它可以随时死掉**：生产方经
+  # runtime/proactive.py 走 request/ack，没人 ack 就直发老主题，行为逐字回落到上线前。
+  proactive:
+    <<: *restart
+    build: { context: .., dockerfile: proactive/Dockerfile }
+    environment:
+      # B3 部署形态闸（本服务未用 <<: *python-env，单列）。
+      DEPLOY_PROFILE: ${DEPLOY_PROFILE:-dev}
+      NATS_URL: nats://nats:4222
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      E2E_NAMESPACE_ADMIN_ENABLED: ${E2E_NAMESPACE_ADMIN_ENABLED:-false}
+      E2E_NAMESPACE_ADMIN_SECRET: ${E2E_NAMESPACE_ADMIN_SECRET-}
+      # 一键回退：false → 治理器不订阅 → 全部生产方自动直发老主题
+      PROACTIVE_GOVERNOR_ENABLED: ${PROACTIVE_GOVERNOR_ENABLED:-true}
+      PROACTIVE_MERGE_WINDOW_MS: ${PROACTIVE_MERGE_WINDOW_MS:-1500}
+      PROACTIVE_DEDUP_WINDOW_S: ${PROACTIVE_DEDUP_WINDOW_S:-600}
+      PROACTIVE_MAX_PER_HOUR: ${PROACTIVE_MAX_PER_HOUR:-6}
+      PROACTIVE_HIGH_LOAD_SPEED: ${PROACTIVE_HIGH_LOAD_SPEED:-80}
+      # 默认空 = 免打扰闸不启用（M3 §9-3 拍板：车机夜间场景与手机不同，不预设口径）
+      PROACTIVE_QUIET_HOURS: ${PROACTIVE_QUIET_HOURS:-}
+      PROACTIVE_DEFER_TICK_S: ${PROACTIVE_DEFER_TICK_S:-5}
+      # M-C 可靠投递账本（proactive_delivery）。**留空即诚实降级**：治理器启动时打
+      # WARNING 并把 durable 报成 off，用户合同消息退回「重启即丢」的旧行为——
+      # 不假装持久接管。同一 PG 实例、独立表，不触碰别的服务的表。
+      POSTGRES_DSN: postgresql://cockpit:${POSTGRES_PASSWORD:-cockpit}@postgres:5432/cockpit
+    depends_on: [nats, postgres]
+
+  # ── 接入层 ──
+  cloud-gateway:
+    <<: *restart
+    build: { context: .., dockerfile: gateway/cloud/Dockerfile }
+    volumes: *certs-vol
+    environment:
+      # B3 部署形态闸（Go 侧实现见 gateway/deployprofile）。
+      DEPLOY_PROFILE: ${DEPLOY_PROFILE:-dev}
+      CLOUD_PLANNER_ADDR: cloud-planner:50054
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # R3.1 层 2（通道鉴权）；默认关，逐字保持现状。
+      AUTH_REQUIRED: ${AUTH_REQUIRED:-false}
+      # 层 2 单条通道 token：cloud-gateway 运行期只用允许集（TOKENS），这一项是给 B3
+      # 校验第 5 项用的（token 必须 ∈ 允许集）。**不往网关灌 Postgres/Grafana 口令**——
+      # Go 侧只校验它自己消费的那几个键，其余由持有它们的 Python 服务校验（见
+      # gateway/deployprofile/profile.go 的表头注释）。
+      CLOUD_CHANNEL_TOKEN: ${CLOUD_CHANNEL_TOKEN:-}
+      CLOUD_CHANNEL_TOKENS: ${CLOUD_CHANNEL_TOKENS:-}
+      # R3.2 服务间 mTLS（默认关；Go 侧经 gateway/tlscfg 读取）
+      GRPC_TLS: ${GRPC_TLS:-off}
+      GRPC_TLS_CA: /certs/ca.crt
+      GRPC_TLS_CERT: /certs/server.crt
+      GRPC_TLS_KEY: /certs/server.key
+      GRPC_TLS_SERVER_NAME: ${GRPC_TLS_SERVER_NAME:-cockpit-mesh}
+    ports: ["8080:8080"]
+    depends_on: [cloud-planner]
+
+  edge-gateway:
+    <<: *restart
+    build: { context: .., dockerfile: gateway/edge/Dockerfile }
+    volumes: *certs-vol
+    environment:
+      # B3 部署形态闸（Go 侧实现见 gateway/deployprofile）。
+      DEPLOY_PROFILE: ${DEPLOY_PROFILE:-dev}
+      EDGE_GATEWAY_PORT: "8090"
+      EDGE_ORCHESTRATOR_ADDR: edge-orchestrator:50070
+      NATS_URL: nats://nats:4222   # 主动建议（agent.proactive）→ HMI WS 投递
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # R3.1 层 1（用户/请求鉴权）；默认关，逐字保持现状。
+      AUTH_REQUIRED: ${AUTH_REQUIRED:-false}
+      AUTH_TOKENS: ${AUTH_TOKENS:-}
+      AUTH_DEFAULT_USER_ID: ${AUTH_DEFAULT_USER_ID:-u1}
+      VEHICLE_ID: ${VEHICLE_ID:-v1}
+      E2E_IDENTITY_ENABLED: ${E2E_IDENTITY_ENABLED:-false}
+      E2E_IDENTITY_SECRET: ${E2E_IDENTITY_SECRET-}
+      # R3.2 服务间 mTLS（默认关；Go 侧经 gateway/tlscfg 读取）
+      GRPC_TLS: ${GRPC_TLS:-off}
+      GRPC_TLS_CA: /certs/ca.crt
+      GRPC_TLS_CERT: /certs/server.crt
+      GRPC_TLS_KEY: /certs/server.key
+      GRPC_TLS_SERVER_NAME: ${GRPC_TLS_SERVER_NAME:-cockpit-mesh}
+    ports: ["8090:8090"]
+    depends_on: [edge-orchestrator, nats]
+
+  edge-orchestrator:
+    <<: *restart
+    # 端侧编排器：内含 Fast Intent + 端侧车控/媒体 Agent + 模拟 VAL（PoC 简化为单进程）
+    build: { context: .., dockerfile: orchestrator/edge/Dockerfile }
+    volumes:
+      - ../certs:/certs:ro
+      # models/ 只读挂载（M5 P3）：端侧语义 NLU 的 ONNX + labels + vocab。**镜像里刻意不
+      # COPY**——它是训练产物、gitignore、每次重训都会变，烤进镜像等于每次重训都要重建。
+      # 挂载缺席（或没训过）时 EdgeNLU 决议 disabled、整链回落规则，与声纹 CAM++ 同款姿态。
+      - ../models:/app/models:ro
+    environment:
+      # B3 部署形态闸（本服务未用 <<: *python-env，单列）。
+      DEPLOY_PROFILE: ${DEPLOY_PROFILE:-dev}
+      CLOUD_GATEWAY_ADDR: cloud-gateway:8080
+      NATS_URL: nats://nats:4222
+      FAST_INTENT_THRESHOLD_HIGH: ${FAST_INTENT_THRESHOLD_HIGH:-0.85}
+      # `_LOW` 从 M5 P3 起真有消费方（端侧语义 NLU 的 θ_low）；此前只有声明没有调用点。
+      FAST_INTENT_THRESHOLD_LOW: ${FAST_INTENT_THRESHOLD_LOW:-0.5}
+      # 端侧语义 NLU 挡位：off | shadow。**不带默认值**——默认只活在 nlu.py::mode() 一处
+      # （.env.example 活跃行压死代码默认的老教训）。
+      EDGE_NLU_MODE: ${EDGE_NLU_MODE:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # R3.1 层 2（通道鉴权）：Hello 携带的 channel token；默认空 → 云侧默认放行。
+      VEHICLE_ID: ${VEHICLE_ID:-v1}
+      CLOUD_CHANNEL_TOKEN: ${CLOUD_CHANNEL_TOKEN:-}
+      # R3.2 服务间 mTLS（默认关）
+      GRPC_TLS: ${GRPC_TLS:-off}
+      GRPC_TLS_CA: /certs/ca.crt
+      GRPC_TLS_CERT: /certs/server.crt
+      GRPC_TLS_KEY: /certs/server.key
+      GRPC_TLS_SERVER_NAME: ${GRPC_TLS_SERVER_NAME:-cockpit-mesh}
+    ports: ["50070:50070"]
+    depends_on:
+      cloud-gateway:
+        condition: service_started
+      nats:
+        condition: service_healthy
+
+  # ── 前端 ──
+  hmi:
+    <<: *restart
+    build: { context: ../hmi, dockerfile: Dockerfile }
+    environment:
+      VITE_EDGE_GATEWAY_URL: http://localhost:8090
+      VITE_AUDIO_API_URL: http://localhost:50059
+      # R3.1 会话鉴权：带 token 连接 WS（默认空=不带 token，保持现状）。
+      VITE_WS_TOKEN: ${VITE_WS_TOKEN:-}
+    ports: ["5173:5173"]
+    depends_on: [edge-gateway]
+
+
+# 观测持久层（collector SQLite）：badcase 轮次/链路/日志跨重启保留
+volumes:
+  obs-data:

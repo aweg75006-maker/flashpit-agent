@@ -1,0 +1,62 @@
+agent_id: mcp-bridge
+version: 0.1.0
+display_name: 生态服务桥
+category: ecosystem
+trust_level: third_party      # 外部服务一律 third_party（硬上限表自动禁高危车控/精确位置）
+deployment: cloud
+latency_budget_ms: 20000      # 外部 server 走子进程 + 网络，给足余量
+fallback: chitchat
+
+# **capabilities 故意留空**：由 `servers.yaml` 的外部工具与 bridge-owned
+# `local_capabilities` 准入清单在启动期合成
+# （`McpBridgeAgent.bootstrap()`，注册发生在 serve 之前）。
+# 新增外部工具 = 改 servers.yaml + 人工审，不改本文件、不改编排核心；本地能力 handler
+# 还必须进入 admission 窄白名单并显式接线，声明本身不能获得任意代码执行权。
+capabilities: []
+
+# 确定性路由兜底（R2.1；2026-07-26 验收补）：「点一杯大杯拿铁」在 shop.order 与
+# nearby.search 之间掷硬币——toolcall 通道 salvage 时判下单、fallback 的 JSON 路径
+# 判找店（画像里有「爱喝拿铁」时更偏后者）。下单动词+量词「杯」+品类共现才兜，
+# 发现类语义（附近/找店/推荐）guard 让路给 nearby，劫持面收窄到点单句式。
+route_hints:
+  # 商户预览取消后的临时草稿清理：只认“本次/本会话 + 订单预览”完整语义，
+  # 不碰真实订单取消、历史订单清理或普通查看。Agent 再按认证 user/session 双键收窄。
+  - pattern: '^\s*(?:请|帮我|给我)?\s*(?:清理|取消|丢弃)\s*(?:本次会话|本会话|本次|这个会话)的?\s*(?:订单|下单)(?:临时)?(?:预览|草稿)\s*[。！!？?]*$'
+    intent: shop.preview_discard
+    policy: replace
+    priority: 126
+  # XS7：不带品牌的历史订单查询走账号型只读入口；此前 MiniMax 偶发落 info.search，
+  # 返回各互联网平台「怎么查订单」教程。品牌词/平台帮助问法由整句锚和 guard 让路。
+  - pattern: '^\s*(?:请|帮我|给我)?\s*(?:查|查询|看|看看)\s*(?:一下)?\s*我?(?:之前|以前|历史|过去)的?\s*(?:订单|单子)\s*[？?]*$'
+    intent: shop.order_status
+    policy: replace
+    priority: 124
+    guard: '(?:麦当劳|瑞幸|淘宝|京东|拼多多|美团|饿了么|怎么|如何)'
+  - pattern: '(点|来|买|订|下单).{0,4}杯\s*(大杯|中杯|小杯)?\s*(拿铁|美式|摩卡|卡布奇诺|澳白|燕麦拿铁|咖啡)'
+    intent: shop.order
+    policy: replace
+    priority: 56
+    # 2026-08-11 guard 增品牌让路词（真实商户激活的配套）：「点一杯瑞幸生椰拿铁」
+    # 带「杯」会命中本 pattern 被抢给 demo 咖啡店——品牌点单未接入时该由 planner
+    # 诚实处理，不该被 demo 截胡。变更经全量路由回归验证（eval_route_hints +
+    # eval_fast_intent + L0 门禁），guard 只增不减、对既有命中面零收缩。
+    # 2026-08-14 guard 增**导航语境**让路词（EVA 二轮真栈实锤 trace 21f99cb3）：
+    # 「导航去东方之门，路上买杯咖啡，五点前要到」被本 hint 整条 replace 成
+    # demo 下单——导航步和五点时限全丢。顺路买咖啡是 navigate_to 的
+    # stop_category 语义（guide navigation-with-stop 教的正是它，但 hint 在
+    # LLM 之后动手，知识拦不住 replace）。命中导航语境即让路还给 planner。
+    guard: '附近|周边|哪里有|哪儿有|哪有|找.{0,3}(店|家|咖啡)|推荐|好喝|咖啡店|咖啡馆|瑞幸|麦当劳|星巴克|库迪|肯德基|导航|路上|顺路|顺道|沿途|途经|带我去|开车去|接完|然后去'
+    slots: {size: "$2", item: "$3"}
+
+requires_permissions:
+  - network.external          # 外部服务出站
+  - payment.invoke            # 写操作涉钱时经 payment-gateway（Agent 不持凭证）
+edge_intents: []
+# `candidates`（Q10 第 7 步；2026-08-24 MC2 校正）：上一轮卡片候选的最小投影
+# （默认序号+名字，只有 `*.menu` 可再带有界商品 id，见 `context.candidate_downlink`）。
+# 它让文本与按钮都先闭合到同一候选项；重名菜单靠服务端 id 保住身份，桥入口先剥掉
+# planner/client 同名槽且商户仍须在新鲜当店菜单内复核，不把该 id 当客户端授权。
+# **刻意仍不要 `location`/`vehicle_state`**：桥是 `trust_level: third_party`，
+# 精确位置属红线级敏感上下文；候选集投影里也因此一个坐标字段都没有，
+# 它不能成为绕过这条声明的第二条路。
+context_scopes: [candidates]

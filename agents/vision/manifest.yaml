@@ -1,0 +1,51 @@
+agent_id: vision
+version: 0.1.0
+display_name: 看一看
+category: core
+trust_level: first_party
+deployment: cloud
+latency_budget_ms: 15000
+fallback: chitchat
+
+# M4 P4 视觉入口：「那是什么」单帧图片问答（子 RFC 2026-07-25-m4-p4 §5）。
+# **图像不进对话链**——HMI 抓帧后 POST 到 llm-gateway 拿一个短 TTL 的 frame_id，
+# 请求里流动的只有这个 id；本 Agent 也拿不到图，只是把 id 转给网关（RFC §5.1）。
+# v1 只做单帧问答；视频流实时理解是 v2（成本与隐私都另议）。
+capabilities:
+  - intent: vision.describe
+    description: 看摄像头当前画面，回答关于眼前实物的问题——那是什么建筑/什么车/什么花/什么牌子
+    slots: [question, frame_id]
+    examples: ["那是什么", "这是什么", "前面那个建筑是什么", "这是什么车",
+               "这是什么花", "看看这个是什么", "那是什么牌子的车"]
+    # 出了卡但 answer 为空 = 假完成（同 nearby.search 的空 items）。
+    # on_fail: report——看图没有「重试就会有」的性质，重试只是再烧一次视觉 token。
+    verification:
+      mode: schema
+      on_fail: report
+      expect: { data_keys: [answer] }
+
+# 确定性路由（R2.1）：「那是什么」是极短的指代句，语义路由容易落到 chitchat。
+# guard 让路两类近似说法：POI 详情（「这家怎么样」归 nearby）、卡片序号指代（归既有链路）。
+# 2026-07-28 数据飞轮 P0 收窄：删过宽分支「帮我看看」——它把「帮我看看附近有什么咖啡店」
+# 这类 LBS 句整句劫持进视觉（badcase 07-26/27 连续两天），而且这是 replace 且触发端侧抓帧。
+# 「帮我看看」单独出现不是视觉意图的充分条件；真视觉句（帮我看看这个是什么/帮我看看前面）
+# 仍由指代分支与「看看(这个|那个|前面)」覆盖。修法是规则收窄而非给 guard 追词。与 HMI 抓帧触发词
+# hmi/src/visionFrame.mjs 同口径（两侧同步改）。
+# route_hints: 无。
+# **这条 hint 已退役**（2026-07-29，全仓第一条被数据退役的规则）。
+# 判据：双臂裸跑——摘掉它之后，它的四句
+# 命中语料在 minimax:MiniMax-M3 下 ×4 轮 12/12 全对（模型 + 范例已经自己会了）。
+# 附带收益：它的 pattern（`这…是什么`）会**劫持** `这个坐标是什么地方` 这类导航句
+# ——与它当初制造的「帮我看看附近有什么咖啡店」是同一类负外部性；退役一并消除。
+# 回归保护没有一起删：四句命中语料已降级为**端到端用例**（hint 没了，「施加 hint 后
+# 应得 X」的断言失去意义，只能改成「planner 端到端应落 X」）。
+
+# 敏感上下文最小化下发：不声明就收不到 vision_frame_id（编排层按此过滤）。
+context_scopes:
+  - vision
+
+requires_permissions:
+  # camera.frame ≠ camera.read：前者是「用户显式问一句时的单帧」，后者是连续流（维持 ❌ 禁）。
+  # third_party 一律拿不到（THIRD_PARTY_DENY_PREFIXES），本 Agent 是 first_party。
+  - camera.frame
+  - network.external

@@ -1,0 +1,402 @@
+# 范例库 · navigation 域（M5 P1 数据飞轮）
+# 契约 skills/exemplars/README.md；只追加不插入（eid=<domain>#序号，插队会让历史日报的 eid 指错条目）。
+domain: navigation
+exemplars:
+- text: 121.47,31.23是哪里
+  plan:
+  - agent: navigation
+    intent: navigation.reverse_geocode
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 公司在杭州西湖区某某大厦
+  plan:
+  - agent: navigation
+    intent: navigation.set_place
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 回家
+  plan:
+  - agent: navigation
+    intent: navigation.navigate_to
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 导航去东方之门途经肯德基
+  plan:
+  - agent: navigation
+    intent: navigation.navigate_to
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 导航去东方之门，附近找个吃饭的地方
+  plan:
+  - agent: navigation
+    intent: navigation.navigate_to
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 导航去公司
+  plan:
+  - agent: navigation
+    intent: navigation.navigate_to
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 带我去首都机场
+  plan:
+  - agent: navigation
+    intent: navigation.navigate_to
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 当前位置
+  plan:
+  - agent: navigation
+    intent: navigation.locate
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 我在什么地方
+  plan:
+  - agent: navigation
+    intent: navigation.locate
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 我在哪
+  plan:
+  - agent: navigation
+    intent: navigation.locate
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 我家在深圳南山区科技园
+  plan:
+  - agent: navigation
+    intent: navigation.set_place
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 我现在在哪
+  plan:
+  - agent: navigation
+    intent: navigation.locate
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 我现在在哪里
+  plan:
+  - agent: navigation
+    intent: navigation.locate
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 把家设成上海长宁区某某小区
+  plan:
+  - agent: navigation
+    intent: navigation.set_place
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+# eid navigation#15 **原地改写**（2026-08-02）：原文「最近的加油站在哪」标 navigation.search_poi，
+# 与当日「找=发现归 nearby / 导航=出行归 navigation」的裁定直接冲突——台账规则是
+# 「判为地盘冲突请**改金标**，不许登记」。范例是 few-shot，留一条与裁定相反的金标等于
+# 反过来教模型。改成同一对象的**出行侧**说法，找的那一侧已落 nearby（见 nearby.yaml 末尾）。
+# 之所以原地改而不是删：删会让 navigation#16 之后全部改号，历史 obs 归因指错条目。
+- text: 导航去最近的加油站
+  plan:
+  - agent: navigation
+    intent: navigation.navigate_to
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+  note: 2026-08-02 按 find-vs-go 裁定改写；原文「最近的加油站在哪」已归 nearby.search
+- text: 查一下这个地点
+  plan:
+  - agent: navigation
+    intent: navigation.poi_detail
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 设置公司地址为北京国贸三期
+  plan:
+  - agent: navigation
+    intent: navigation.set_place
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 这个地方的详细信息
+  plan:
+  - agent: navigation
+    intent: navigation.poi_detail
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 这个坐标是什么地方
+  plan:
+  - agent: navigation
+    intent: navigation.reverse_geocode
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 这是哪里
+  plan:
+  - agent: navigation
+    intent: navigation.locate
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 去深圳像笋一样的那栋大楼
+  plan:
+  - agent: navigation
+    intent: navigation.search_poi
+  source: manifest
+  added: '2026-07-30'
+  tags:
+  - canonical
+  note: 视觉地标解析是 search_poi 的独有路径
+- text: 国贸三期在哪个位置
+  plan:
+  - agent: navigation
+    intent: navigation.search_poi
+  source: manifest
+  added: '2026-07-30'
+  tags:
+  - canonical
+- text: 导航去南山科技园
+  plan:
+  - agent: navigation
+    intent: navigation.navigate_to
+  source: trace
+  added: '2026-07-30'
+  tags:
+  - badcase
+  note: M-A B5-1 长会话中断恢复后 MiniMax 拒识；按 M5 数据飞轮转为精确范例
+- text: 路上帮我找家咖啡店，顺路买一杯
+  plan:
+  - agent: navigation
+    intent: navigation.navigate_to
+    slots:
+      stop_category: 咖啡店
+  source: trace
+  added: '2026-07-30'
+  tags:
+  - badcase
+  note: M-A B5-1 曾只落 shop.menu 丢路线；当前目的地由会话焦点确定性继承
+- text: 就去第二家
+  plan:
+  - agent: navigation
+    intent: navigation.navigate_to
+    slots:
+      destination: 上一轮列表的第二项
+  source: trace
+  added: '2026-07-31'
+  tags:
+  - badcase
+  note: M-A B1-1 长会话中曾回落 nearby.search；列表内容由会话历史解析
+# ── 2026-08-04 补：ASR 同音字「到航」= 导航 ────────────────────────────────
+# 立卡来源 ex.homophone.navigate（对抗语料 stable，A9 同音字）：落 `navigation.search_poi`
+# 而不是 `navigate_to`，诊断行 `exemplars=[]`——50 条导航范例里**动词一律写作「导航」**，
+# 同音字把词法通道整条打断（「到航去广州南站」对既有范例最高只有 0.167）。
+# 同 2026-08-03 `ex.homophone.aircon` 的修法：**同音字要的是范例不是正则**。
+- text: 到航去机场
+  plan:
+  - agent: navigation
+    intent: navigation.navigate_to
+    slots:
+      destination: 机场
+  source: manual
+  added: '2026-08-04'
+  tags:
+  - badcase
+  note: 「到航」是「导航」的 ASR 常见错字；带目的地的仍是发起导航，不是搜 POI
+# ── 2026-08-14 EVA 二轮批 B：时间约束 / 路线偏好 / 多途经点 / 自然地物 ────────
+- text: 去接孩子放学，五点前要到学校
+  plan:
+  - agent: navigation
+    intent: navigation.navigate_to
+    slots:
+      destination: 孩子
+      arrive_by: 五点
+  source: manual
+  added: '2026-08-14'
+  tags:
+  - canonical
+  note: 到达时限填 arrive_by（原话时间）；人称目的地由关系边解析，不猜地名
+- text: 不走高速送我去机场
+  plan:
+  - agent: navigation
+    intent: navigation.navigate_to
+    slots:
+      destination: 机场
+      route_pref: 不走高速
+  source: manual
+  added: '2026-08-14'
+  tags:
+  - canonical
+  note: 路线偏好填 route_pref，不是丢弃也不是另拆一步
+- text: 今天不赶时间，带我走一条风景好一点的路回家
+  plan:
+  - agent: navigation
+    intent: navigation.navigate_to
+    slots:
+      destination: 家
+      route_pref: 风景好
+  source: manual
+  added: '2026-08-14'
+  tags:
+  - canonical
+  note: 「风景好的路」是路线偏好不是新目的地；能力侧会诚实降档为不走高速大路
+- text: 导航去东方之门，途经肯德基和星巴克
+  plan:
+  - agent: navigation
+    intent: navigation.navigate_to
+    slots:
+      destination: 东方之门
+      waypoint: 肯德基和星巴克
+  source: manual
+  added: '2026-08-14'
+  tags:
+  - canonical
+  note: 多个途经点连写进同一个 waypoint 槽（能力侧拆分保序），不拆多步
+- text: 带我去上海那个特别大的圆圆的湖
+  plan:
+  - agent: navigation
+    intent: navigation.search_poi
+    slots:
+      keyword: 上海特别大的圆圆的湖
+  source: manual
+  added: '2026-08-14'
+  tags:
+  - canonical
+  note: 自然地物的视觉描述与建筑同路：search_poi 的地标解析路径（→滴水湖），不逐字搜
+- text: 带我去上次我们看夜景的那个地方
+  plan:
+  - agent: navigation
+    intent: navigation.navigate_to
+    slots: {}
+  source: manual
+  added: '2026-08-14'
+  tags:
+  - canonical
+  note: 历史指代触发情景记忆召回（G6）；destination 只能取自召回的去过地点，召不到就追问，不猜
+- text: 刚才那个途经点不去了
+  plan:
+  - agent: navigation
+    intent: navigation.reroute
+    slots:
+      remove_waypoint: 途经点
+  source: manual
+  added: '2026-08-15'
+  tags:
+  - canonical
+  note: G8 增量改道：焦点里有「当前正在导航」时改的是这次路线，不是多日行程（那是 trip.modify）
+- text: 咖啡不买了，先去趟加油站，别迟到
+  plan:
+  - agent: navigation
+    intent: navigation.reroute
+    slots:
+      remove_waypoint: 咖啡
+      add_waypoint: 加油站
+  source: manual
+  added: '2026-08-15'
+  tags:
+  - canonical
+  note: G8 动态重规划：删+加途经点一轮完成，时限（别迟到=保持原 arrive_by）不丢
+- text: 换条避堵的路
+  plan:
+  - agent: navigation
+    intent: navigation.reroute
+    slots:
+      route_pref: 避开拥堵
+  source: manual
+  added: '2026-08-15'
+  tags:
+  - canonical
+  note: G8 导航中换路线策略；同目的地同途经点重规划，不是发起新导航
+- text: 接儿子放学，顺路买杯奶茶，六点前要到学校
+  plan:
+  - agent: navigation
+    intent: navigation.navigate_to
+    slots:
+      destination: 儿子
+      stop_category: 奶茶
+      arrive_by: 六点前
+  source: manual
+  added: '2026-08-15'
+  tags:
+  - canonical
+  note: P6 组合接送形（人称+顺路+时限一步到位）：destination=人称词由 agent 关系图谱解析（不知道就诚实教学问）；真栈方差=planner 偶发只口头确认不起 navigate
+- text: 五点半前去接老公，顺路取个奶茶，别迟到
+  plan:
+  - agent: navigation
+    intent: navigation.navigate_to
+    slots:
+      destination: 老公
+      stop_category: 奶茶
+      arrive_by: 五点半前
+  source: manual
+  added: '2026-08-15'
+  tags:
+  - canonical
+  note: P6 接配偶形：destination 填人称词本身（真栈方差=slot 被填成整句原话）；别迟到=保持 arrive_by 不产新时限
+- text: 先送孩子去学校，然后送我去公司，路上买个早餐
+  plan:
+  - agent: navigation
+    intent: navigation.navigate_to
+    slots:
+      destination: 公司
+      waypoint: 学校
+      stop_category: 早餐
+  source: manual
+  added: '2026-08-15'
+  tags:
+  - canonical
+  note: P1 多目的地先后序=终点+途经点（「先A后B」B 是 destination、A 是 waypoint）；学校/公司经画像/关系解析，未设置会诚实引导（真栈曾打散成快速路入口搜索）
+# ── 2026-08-20 person-pickup 卡（§4.1 ②）：接送复合句的「两半」 ────────────
+- text: 接爸妈去吃饭
+  plan:
+  - agent: navigation
+    intent: navigation.navigate_to
+    slots:
+      destination: 爸妈
+      stop_category: 吃饭
+  source: manual
+  added: '2026-08-20'
+  tags:
+  - badcase
+  note: 一#5 真栈三次取样**全部只答「吃饭」那半**，「接谁」整个被丢掉（落成纯 nearby.search，答得还挺好——所以话术层看不出缺了一半）。接送复合句与「接孩子放学，顺路买杯奶茶」同形：destination 填人称词本身、吃饭那半是 stop_category，不是把整句判成周边搜索
+- text: 先去接我儿子，再找家川菜馆
+  plan:
+  - agent: navigation
+    intent: navigation.navigate_to
+    slots:
+      destination: 儿子
+      stop_category: 川菜馆
+  source: manual
+  added: '2026-08-20'
+  tags:
+  - badcase
+  note: 同上一条的另一种句形（先…再…）。加它是因为**上一条只治了它示范的那个形**——真栈实测「接爸妈去吃饭」0/3→3/3 的同一批里，这个句形仍稳定 0/3（三次逐字相同地只答川菜那半）。「补上 X」与「补上 X 就能修」是两个命题，第二个得单独证

@@ -1,0 +1,94 @@
+agent_id: nearby
+version: 0.2.0
+display_name: 周边发现
+category: ecosystem
+trust_level: third_party
+deployment: cloud
+# 高德走统一 AsyncHttpClient：3s ×（代理+直连回退）× 2 次尝试 + 150ms 退避，
+# 最坏约 12.15s。DAG 外层必须给完 provider 自己的有界重试，不能被历史 4s 先杀死。
+latency_budget_ms: 15000
+fallback: chitchat
+
+capabilities:
+  # 判别化（2026-07-30 地盘收口）：本条与 navigation.search_poi 的描述此前几乎逐字重叠
+  # （两边都写「搜 POI（餐厅/充电站/加油站/停车场）」），planner 拿到两个等价工具只能掷硬币
+  # ——于是两条 replace 正则被拉来当裁判。判据换成**产出形态**：本条是「给人挑」的发现面
+  # （多候选 + 富数据比较），navigation.search_poi 是「给车用」的地点解析（一个目标）。
+  - intent: nearby.search
+    description: 周边**发现与比较**——列出多个候选让用户挑（餐饮/酒店/景点/影院/停车场/超市/
+      便利店/药店等生活服务），支持菜系/品牌/评分/人均/排序过滤，返回评分·人均·距离·营业信息。
+      「去哪玩/出去逛」类请求也归本条——雨雪/高温等恶劣天气填 category=室内（自动组合
+      商场/电影院/博物馆等推荐），好天气填 景点/公园；已知天气时把天气词放 weather_context
+      槽（如「雨」），话术会承接天气给出解释。用户在「看看附近有什么」时用本条；已经知道
+      要去哪、只需定位一个具体地点归 navigation.search_poi；**找充电桩归 charging.find**
+      （它按真实电量+空闲状态排序）。用户已经说出设施/品类时，不得让 category 和 keyword
+      同时为空：通用品类填 category，具体名称/品牌/设施词填 keyword。
+    # 2026-08-14 摘除死槽位 radius/price_level（声明了但 provider 参数面与 agent 全程零消费，
+    # B4 纪律：无消费方的声明只会漂移；price_level 与 price_max 语义重复）。
+    slots: [category, keyword, cuisine, brand, rating_min, price_max, open_now, sort, location, weather_context]
+    examples: ["附近有什么好吃的", "找家川菜馆", "附近评分高的火锅", "人均一百以内的川菜",
+               "附近的餐厅", "附近的酒店", "附近的电影院", "找个停车场", "麦当劳在哪", "附近的景点",
+               "下雨天去哪儿玩", "附近有什么商场"]
+    # M2 Outcome Verifier 首批试点（列表面）：出了 place_list 卡但 items 是空列表 = 假完成。
+    # on_fail: retry（1 次）——POI 检索的空结果常是瞬时的，重试有真实成功率；
+    # 重试只对 require_confirm=false 的步开放（副作用永不重放，verify.retry_allowed 硬约束）。
+    # Agent 自己诚实降级（「附近暂时没找到」，无卡无 data）的路径不会被重复念，
+    # 见 executor._should_report。
+    verification:
+      mode: schema
+      on_fail: retry
+      max_attempts: 1
+      expect: { data_keys: [items] }
+  - intent: nearby.detail
+    description: 仅查看对话中**已选中或已引用**的某一个地点详情——评分、人均、电话、营业时间、
+      特色、图片、地址；「附近是否有/附近有哪些 X」仍是多候选发现，必须用 nearby.search，
+      不能因为用户只说一个品类就改用 nearby.detail
+    slots: [poi_id, name]
+    examples: ["看第一个的详情", "这家怎么样", "它家电话多少", "几点关门", "人均多少"]
+  - intent: nearby.order
+    description: 在餐厅等商户点单/订位/预订座位（涉及费用/承诺，需二次确认；当前仅少数连锁接入，预留）
+    # 2026-08-14 摘除 datetime/party_size：诚实桩不读它们（订座属生态搁置面），
+    # 声明会让 LLM 白抽取；真实订座接入时随能力一起回来。
+    slots: [poi_id, name]
+    examples: ["在这家点单", "订个餐厅", "帮我订一家川菜馆", "订今晚7点两位", "帮我订位"]
+    require_confirm: true
+
+# 确定性路由（R2.1）：弱 LLM 常把「发现/详情」说法误路由到 navigation/chitchat。
+# 发现归 nearby、出行归 navigation；guard 命中导航动词则让给 navigation。经 RouteHintEngine 通用消费。
+#
+# ⚠ 2026-07-30 地盘收口更正：这里原来写着「pattern 只认生活发现说法（**不含充电/加油/停车等
+# 设施类目**，避免抢 navigation 既有设施流程）」——而下面第二条 hint（2026-07-19 周边发现
+# 重构加的）恰恰专门认设施类目。**注释与实现互相否定**，这就是「nearby 规则群内讧」的真面目：
+# 不是规则打规则，是**地盘搬过家却没有全局收口**——旧声明留在 navigation.examples、
+# charging.examples 和这条注释里，P1 把 manifest examples 批量导入范例库时，把这些**过期
+# 声明变成了金标**，于是判定尺自己开始自相矛盾（退役判定把「金标错了」读成「规则失效了」）。
+# 教训：**盘活死资产的同时也会把死资产里的错误一起激活**。
+route_hints:
+  # 【nearby.search 的 route_hint 已于 2026-07-30 退役】判据：双臂裸跑
+  #   minimax:MiniMax-M3 / deepseek:deepseek-v4-flash 各 ×2 轮，其 13 条命中语料**全覆盖**
+  #   （非抽样——抽 3 句会系统性高估，命中面越大的规则越容易被放行）；
+  #   摘掉它之后仍全部落对 → 模型 + 范例已经自己会了。
+  #   ⚠ 证据只覆盖上述两档。本 hint 家族当初是为 **MiMo** 写的
+  #     （route_hints.py 开篇：「弱 LLM（MiMo）常漏/误路由」），而本环境
+  #     MiMo 无可用 key（探针 all models failed），**切回 MiMo 须复验**。
+  #   回归保护未删：命中句已改端到端口径迁入 mode_routing_cases.yaml。
+  #   要恢复：git log -S '附近(有|有没有|有什么|有啥|有点)?.{0,' 找回原块。
+  # 【nearby.search 的 route_hint 已于 2026-07-30 退役】判据：双臂裸跑
+  #   minimax:MiniMax-M3 / deepseek:deepseek-v4-flash 各 ×2 轮，其 2 条命中语料**全覆盖**
+  #   （非抽样——抽 3 句会系统性高估，命中面越大的规则越容易被放行）；
+  #   摘掉它之后仍全部落对 → 模型 + 范例已经自己会了。
+  #   ⚠ 证据只覆盖上述两档。本 hint 家族当初是为 **MiMo** 写的
+  #     （route_hints.py 开篇：「弱 LLM（MiMo）常漏/误路由」），而本环境
+  #     MiMo 无可用 key（探针 all models failed），**切回 MiMo 须复验**。
+  #   回归保护未删：命中句已改端到端口径迁入 mode_routing_cases.yaml。
+  #   要恢复：git log -S '(附近|周边|就近|最近的?|旁边|这边|哪儿?' 找回原块。
+requires_permissions:
+  - location.read
+  - network.external
+  - payment.invoke   # 仅 nearby.order 预留桩用；发现/详情只读
+edge_intents: []
+# `session_constraints`（C12-B，2026-08-28）：用户**在这次会话里说出来**的忌口/偏好
+# （「我不吃辣，也不想排长队」）。它与记忆画像是前景/背景两回事——真栈 T28 说完、
+# T29 就拿到 10 家川菜，因为那句话落在 chitchat 轮、nearby 只读得到当轮原话。
+# 判据与词表在 `runtime/session_constraints.py`，本 Agent 只消费。
+context_scopes: [location, session_constraints]   # 周边搜索按需下发精确位置（最小化）

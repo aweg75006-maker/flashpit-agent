@@ -1,0 +1,76 @@
+# 范例库 · safety 域（M5 P1 数据飞轮）
+# 契约 skills/exemplars/README.md；只追加不插入（eid=<domain>#序号，插队会让历史日报的 eid 指错条目）。
+domain: safety
+exemplars:
+- text: 今天适合开车吗
+  plan:
+  - agent: road-safety
+    intent: safety.driving_advice
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 开车去上海安全吗
+  plan:
+  - agent: road-safety
+    intent: safety.driving_advice
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+# 2026-07-30 地盘收口：这两条原来是「暴雨预警了吗」「有天气预警吗」——与 info.alerts 的
+# 例句只差语气词（cos 0.958 / IDF-Dice 0.689，全库跨域相似度最高的一对）。裸问预警本身归
+# info.alerts；本域的判别特征是**对驾驶的影响**，例句必须体现它。
+- text: 这天气预警影响开车吗
+  plan:
+  - agent: road-safety
+    intent: safety.weather_alert
+  source: manifest
+  added: '2026-07-30'
+  tags:
+  - canonical
+- text: 有预警的话路上要注意什么
+  plan:
+  - agent: road-safety
+    intent: safety.weather_alert
+  source: manifest
+  added: '2026-07-30'
+  tags:
+  - canonical
+# 2026-08-03：这条原来是「路上怎么样」→ safety.driving_advice，**与人裁台账直接打架**
+# （`boundaries.yaml#nearby-safety.poi-vs-road-condition` 裁定「路上怎么样」的对象是
+# 前方路况）。它以 `@lex:1.00` 精确命中把语料里同一句拉去 driving_advice，对抗测试消融
+# 给出 `causal=supported`。原句保留、改指向台账那一侧；driving_advice 另补一条**真的
+# 体现驾驶建议角度**的说法（manifest 同步改，那里才是这条范例的来源）。
+- text: 这会儿开车出门合适吗
+  plan:
+  - agent: road-safety
+    intent: safety.driving_advice
+  source: manifest
+  added: '2026-08-03'
+  tags:
+  - canonical
+- text: 路上怎么样
+  plan:
+  - agent: road-safety
+    intent: safety.road_condition
+  source: manual
+  added: '2026-08-03'
+  tags:
+  - canonical
+- text: 路况怎么样
+  plan:
+  - agent: road-safety
+    intent: safety.road_condition
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 高速堵车吗
+  plan:
+  - agent: road-safety
+    intent: safety.road_condition
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical

@@ -1,0 +1,161 @@
+"""时刻与时间窗的**确定性**解析（G1 时间约束求解的共享实现）。
+
+三件事，各有明确边界：
+- `parse_clock_time`：中文/数字时刻 → epoch 秒（原 navigation `_parse_arrive_by`，
+  行为逐字不变）。**唯一实现**——nearby 要用同一套消歧语义，判定抄两份正是 B1 那个
+  bug 的成因（CLAUDE.md §6）。
+- `parse_event_time`：**事件时刻**（「晚上7点的电影」「7点半那场话剧」）。与到达时限
+  （「5点前到」）刻意互斥：后者归 navigation 的 `arrive_by`，两条链不许抢同一句。
+- `dining_window`：由事件时刻**反推**用餐窗（入座/离席/事件）。路上时间是**明说的
+  假设**不是伪造的数据——调用方必须把它念出来（本项目的诚实降级形态）。
+
+纯函数、零 I/O，`now_ts` 可注入供测试。
+"""
+from __future__ import annotations
+
+import re
+import time
+
+from runtime.clock import epoch_at, hhmm, local_struct, minutes_of
+from runtime.cntime import (CN_NUM_CHARS, SEG_ALT, cn_int, day_offset_of,
+                            segment_kind, to_24h)
+
+# 时刻本体：HH:MM 或 N点[半|N分]，可带段位前缀（槽位值与原话片段共用）。
+# 数字时刻用 \d{1,2}（「10点」「23点」是两位——单字符类会把「10点」错拆成「0点」）。
+# ⚠ **段位词与中文数字来自 `runtime.cntime`，这里不再自带词表**（2026-08-16，Q12）：
+# 自带那份少了「早晨」「夜里」，于是「早晨八点」退回裸 12 小时制消歧、在 09:00 被判成
+# **20:00**，而 reminder 的同一句给 08:00。时刻本体的写法仍留在本地——
+# 它与 timeparse 的捕获需求不同，那是两个问题，`test_cntime.py` 只保证两者
+# **接受同一批字符串**。
+_CLOCK_RE = re.compile(
+    rf"(?:({SEG_ALT})\s*)?"
+    rf"(?:(\d{{1,2}})[:：](\d{{2}})|(十一|十二|\d{{1,2}}|[{CN_NUM_CHARS}])\s*点\s*"
+    r"(半|\d{1,2}分)?)")
+
+
+def parse_clock_time(text: str, now_ts: int | None = None) -> int | None:
+    """「时刻」→ epoch 秒；解析不出返回 None。纯确定性，now 可注入供测试。
+
+    裸 1-11 点无段位按「未来最近一次」消歧：14:00 说「5点前到」= 今天 17:00。
+    带段位/24h 时刻过点即滚到明天同刻（「明早5点」「17:00」的滚日不改变小时语义）。
+
+    ⚠ **裸时刻两个候选都已过时的那一支返回「今天已经过去的那个时刻」，是过去的
+    epoch**（C13-A，2026-08-28）。原实现在这一支滚到次日同数字小时——18:53 说
+    「5点我要到学校」被解成**次日 05:00**，于是话术播出「比您要求的 5:00 早约
+    593 分钟」（真栈 family T8 实录，模型自己在同一句里吐槽「应该是把5点当成
+    凌晨5点了」）。**滚日不该改变小时语义**：说「5点」指的是今天 17:00（已经过了），
+    不是明天 05:00；滚到明天该算 17:00 还是 5:00 本身无解，说明这一支不该猜。
+    调用方据此判「时限已过」（判据就是 `ts <= now`，不需要第二个返回值——
+    其余各支一律返回未来时刻）。
+    """
+    m = _CLOCK_RE.search(text or "")
+    if not m:
+        return None
+    seg, hh, mm, cn, cn_min = m.groups()
+    if hh is not None:
+        hour, minute = int(hh), int(mm)
+    else:
+        parsed = cn_int(cn)
+        if parsed is None:
+            return None
+        hour = parsed
+        minute = 30 if cn_min == "半" else (int(cn_min[:-1]) if cn_min else 0)
+    if not (0 <= hour <= 24 and 0 <= minute < 60):
+        return None
+    now = int(now_ts if now_ts is not None else time.time())
+    # ⚠ 墙钟必须按**业务时区**取（容器 TZ=UTC）：裸 localtime 会让「晚上7点」
+    # 变成 19:00 UTC=次日 03:00 北京，而宿主 UTC+8 跑单测永远不红。
+    lt = local_struct(now)
+
+    def _at(day_off: int, h: int) -> int:
+        return epoch_at(lt.tm_year, lt.tm_mon, lt.tm_mday + day_off, h % 24, minute)
+
+    kind = segment_kind(seg)
+    hour, plus_day = to_24h(hour, kind)     # 「晚上12点」在这里变成次日 00:00
+    if kind or plus_day or hour >= 12 or hour == 0:
+        ts = _at(plus_day, hour)
+        return ts if ts > now else _at(plus_day + 1, hour)
+    cands = [t for t in (_at(0, hour), _at(0, hour + 12)) if t > now]
+    if cands:
+        return min(cands)
+    # 两个候选皆过时：取**今天最近的那一个**（=下午那支），并让它留在过去。
+    # 见上方 docstring 的 C13-A 说明。
+    # ⚠ **原话点名了后面的日子时不走这一支**：「明早5点」的日子是用户自己说的，
+    #   滚日不是猜的。本模块整体不消费日词（那是 `timeparse` 的活，reminder 走它），
+    #   这里只判在场——滚日行为对该形态逐字保持旧样。
+    #   残余：日词在场且**候选未过时**时仍按今天算（「明早5点」14:00 说 → 今天
+    #   17:00），那是本模块不消费日词的既有缺口，本次刻意不扩大改动面去动它。
+    if (day_offset_of(text) or 0) > 0:
+        return _at(1, hour)
+    return max(_at(0, hour), _at(0, hour + 12))
+
+
+# ── 事件时刻（G1 余项：反推窗的输入）──────────────────────────────
+# 只认「有场次/班次概念」的事件词——它们才隐含「必须在那之前到」。
+# 刻意不含「饭/午饭/晚饭」：那是被反推的对象本身，含进来会自我循环。
+_EVENT_WORDS = ("电影", "影片", "场次", "演出", "话剧", "音乐会", "演唱会", "音乐节",
+                "球赛", "比赛", "决赛", "讲座", "发布会", "展览", "秀",
+                "航班", "飞机", "火车", "高铁", "动车", "列车",
+                "会议", "开会", "面试", "婚礼", "party", "聚会", "约会")
+_EVENT_RE = re.compile("|".join(_EVENT_WORDS))
+# 时刻与事件词的最大间隔（字符）：「晚上7点的电影」间隔 1、「7点半有场话剧」间隔 3、
+# 「电影是晚上7点」事件在前。放宽到 12 足够覆盖口语插入语，又不至于把整句里
+# 八竿子打不着的两个词凑成一对。
+_EVENT_GAP = 12
+
+
+def parse_event_time(text: str, now_ts: int | None = None) -> tuple[int, str] | None:
+    """「时刻 + 事件词」→ (事件 epoch 秒, 事件词)；不成对返回 None。
+
+    与到达时限互斥：「5点前到」「五点我要到」不含事件词 → 本函数不认（归
+    navigation 的 `arrive_by`）。一句里两者都有时各走各的链，不互相覆盖。
+    """
+    t = text or ""
+    clock = _CLOCK_RE.search(t)
+    if not clock:
+        return None
+    ev = None
+    for m in _EVENT_RE.finditer(t):
+        gap = (m.start() - clock.end()) if m.start() >= clock.end() else (clock.start() - m.end())
+        if 0 <= gap <= _EVENT_GAP:
+            ev = m
+            break
+    if ev is None:
+        return None
+    ts = parse_clock_time(clock.group(0), now_ts=now_ts)
+    return (ts, ev.group(0)) if ts else None
+
+
+# 默认用餐时长与路上预留：**是假设不是数据**，调用方必须把它念给用户听。
+DINING_DWELL_MIN = 60
+DINING_BUFFER_MIN = 30
+
+
+def dining_window(event_ts: int, *, dwell_min: int = DINING_DWELL_MIN,
+                  buffer_min: int = DINING_BUFFER_MIN,
+                  now_ts: int | None = None) -> dict:
+    """由事件时刻反推用餐窗 → {seat_ts, leave_ts, event_ts, dwell_min, buffer_min, tight}。
+
+    `leave = event - buffer`（路上预留）、`seat = leave - dwell`（用餐时长）。
+    `tight=True` 表示按这个窗口已经来不及（入座时刻不在未来）——调用方必须**如实说
+    来不及**，不许把窗口压缩到编出一个能凑上的数。
+    """
+    now = int(now_ts if now_ts is not None else time.time())
+    leave = int(event_ts) - buffer_min * 60
+    seat = leave - dwell_min * 60
+    return {"seat_ts": seat, "leave_ts": leave, "event_ts": int(event_ts),
+            "dwell_min": dwell_min, "buffer_min": buffer_min,
+            "tight": seat <= now}
+
+
+def fmt_clock(ts) -> str:
+    """epoch → 业务时区「HH:MM」。播给用户的时刻一律走这里。"""
+    return hhmm(int(ts))
+
+
+def clock_minutes(ts) -> int:
+    """epoch → 当天的「时:分」折算分钟（供营业时段判定注入 now_min）。
+
+    ⚠ 必须与 `providers/base.is_open_now` 同一时区——它按 UTC+8 判营业时段，
+    这里若按容器本地时（UTC）算，筛出来的「营业中」会整体错 8 小时。"""
+    return minutes_of(int(ts))

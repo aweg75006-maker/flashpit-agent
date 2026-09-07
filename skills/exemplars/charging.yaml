@@ -1,0 +1,164 @@
+# 范例库 · charging 域（M5 P1 数据飞轮）
+# 契约 skills/exemplars/README.md；只追加不插入（eid=<domain>#序号，插队会让历史日报的 eid 指错条目）。
+domain: charging
+exemplars:
+- text: 去杭州怎么充电
+  plan:
+  - agent: charging-planner
+    intent: charging.plan
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 帮我规划充电
+  plan:
+  - agent: charging-planner
+    intent: charging.plan
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 快充在哪
+  plan:
+  - agent: charging-planner
+    intent: charging.find
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 找个充电站
+  plan:
+  - agent: charging-planner
+    intent: charging.find
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 现在电量多少
+  plan:
+  - agent: charging-planner
+    intent: charging.status
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 还能跑多远
+  plan:
+  - agent: charging-planner
+    intent: charging.status
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 附近有充电桩吗
+  plan:
+  - agent: charging-planner
+    intent: charging.find
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+# 2026-07-30 地盘收口：这条原在 navigation.yaml 标 navigation.search_poi（2026-07-19
+# 周边发现重构留下的过期声明）。充电桩发现归本域——读真实 SOC、按空闲优先排序。
+- text: 附近的充电站
+  plan:
+  - agent: charging-planner
+    intent: charging.find
+  source: manifest
+  added: '2026-07-30'
+  tags:
+  - canonical
+  note: 原标 navigation.search_poi，2026-07-30 改判
+# 2026-08-05：避免四字耗尽陈述与只多「吗」的 status 问句都被同一 find 范例硬拉；
+# 保留“附近找快充”的 canonical 语义，换掉过宽的「没电了」词形。
+- text: 电量告急，附近找个快充
+  plan:
+  - agent: charging-planner
+    intent: charging.find
+  source: manifest
+  added: '2026-07-30'
+  tags:
+  - canonical
+# ── 2026-08-04 补：ASR 同音字「冲电」= 充电 ────────────────────────────────
+# 立卡来源 ex.homophone.charging（对抗语料 stable，A9 同音字）：落 `nearby.search`
+# （gold 明禁），检索名单里最近的反而是 `nearby#25「油不多了，附近哪儿有加油站」`——
+# 那条教的是「附近哪儿有 X → nearby.search」，正好把这句拉过去。
+# **两条台账裁定在这句话上是打架的**：`nearby-navigation.find-vs-go` 说「找/搜/附近
+# 哪儿有」一律 nearby，`charging-nearby.*` 说充电桩归 charging.find。裁定的真正边界是
+# **充电桩是特例**（读真实 SOC、按空闲排序、可当导航途经点），不是动词。这条范例把
+# 那个特例摆在与加油站同一个说法框架里，让边界可见——**但那句话没能写出来**：
+# 「附近哪儿有冲电的地方」与 `nearby#25` 的 IDF-Dice 是 **0.361 ≥ lex_min**，台账门禁
+# 正当拦下，要求先裁定登记；而登记一条 ruling 又要 4 条 `reviewed_by: human` 的双向
+# 对照用例（`validate_boundary_coverage`），那是泓舟的活不是我的。所以本条退到只教
+# **同音字**，把「附近哪儿有充电桩 vs 加油站」这条边界原样挂账（findings §12.3）。
+- text: 附近哪儿有冲电的地方
+  plan:
+  - agent: charging-planner
+    intent: charging.find
+  source: manual
+  added: '2026-08-04'
+  tags:
+  - badcase
+  note: 与「附近哪儿有加油站」同一说法框架、不同落域——边界见 boundaries.yaml
+    charging-nearby.charger-vs-gas-station
+- text: 哪儿能冲电
+  plan:
+  - agent: charging-planner
+    intent: charging.find
+  source: manual
+  added: '2026-08-04'
+  tags:
+  - badcase
+  note: 「冲电」是「充电」的 ASR 常见错字；充电桩是 find-vs-go 判据的特例，不随「附近哪儿有」归 nearby
+# ── 2026-08-05 补：电量状态陈述也可能是在求助补能 ─────────────────────────
+# 立卡来源 os.battery.car，但不复制原句；边界是「电量已经耗尽、需要解决」与
+# 「明确查询百分比/续航/充电状态」。前者找补能点，后者才查 status。
+# 近乎抄题的完成体会把相邻 status 问句一起拉向 find，故不在词法层强行钉这条短边界；
+# 本条保留实质不同的求助表达，hybrid 可用时供语义通道补位，纯词法失配则由 manifest 判据处理。
+- text: 续航已经见底，帮我找个补电的地方
+  plan:
+  - agent: charging-planner
+    intent: charging.find
+  source: manual
+  added: '2026-08-05'
+  tags:
+  - badcase
+  note: 车辆电量耗尽后的补能求助归 charging.find；不等同于查询当前电量或充电状态
+# 明确 status 对照：与耗尽求助分开，避免语义通道只看到 find 单边样本。
+- text: 车现在还有多少电
+  plan:
+  - agent: charging-planner
+    intent: charging.status
+  source: manual
+  added: '2026-08-05'
+  tags:
+  - boundary
+  note: 明确询问当前电量归 charging.status；不等同于陈述电量耗尽后的补能求助
+# ── 2026-08-28 补（QA C14 / P1-11）：肯定的规划诉求 + 否定的执行方式 ────────
+# 真栈 info T48「规划去广州路上的补能，但先不要启动导航」落到 chitchat 并**编造**了
+# 一段路线（「为您规划路线：目的地"广州路补能"…请确认是否发起导航？」）。
+# 三条成因叠在一起：① `charging.plan` 本来就只出建议卡、不发导航，但这个性质
+# **没写进 manifest 描述**，planner 无从知道「先不要启动导航」与它相容；
+# ② 否定 policy 的既有 golden 只覆盖「先别导航去机场」这类**整句被否定**的形态，
+# 「肯定诉求 + 否定执行方式」没有任何范例；③ 「去广州路上的补能」被读成地名
+# 「广州路补能」是次生症状——落对域之后 destination 槽就是「广州」。
+- text: 规划去广州路上的补能，但先不要启动导航
+  plan:
+  - agent: charging-planner
+    intent: charging.plan
+    slots: {destination: 广州}
+  source: trace
+  added: '2026-08-28'
+  tags:
+  - badcase
+  note: 否定的是「启动导航」这个执行方式，不是规划本身；charging.plan 只出建议卡，本就不发导航
+- text: 帮我算一下去杭州路上在哪补电，先别导航
+  plan:
+  - agent: charging-planner
+    intent: charging.plan
+    slots: {destination: 杭州}
+  source: manual
+  added: '2026-08-28'
+  tags:
+  - badcase
+  note: 同族换说法（第二正例）；「先别导航」是对执行方式的限定，规划诉求照常成立

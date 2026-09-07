@@ -1,0 +1,239 @@
+"""AgentClient：供 Agent 在 handle() 内调用其他 Agent。
+
+WS6 协作模式：Agent 经 SDK 直接调用其他 Agent，带护栏防滥用。
+本客户端强制的护栏：
+  1. 调用深度上限（防无限链），MAX_DEPTH=2
+  2. 环检测（caller 在调用栈中再次出现 → 拒绝）
+  3. 超时（取被调 manifest.latency_budget_ms）
+
+权限**不**在此层做「被调权限 ≤ 调用方」的子集校验——sub-planner（如 trip-planner，
+权限仅 location.read/network.external）本就要编排权限更高的叶子 Agent（navigation 需
+navigation.control），子集校验会误杀正常协作。权限按「用户 granted_scopes」在编排层强制：
+orchestrator/cloud/dispatch.py 校验 step.required_permissions ⊆ granted 并禁 third_party
+请求 vehicle.control；车控最终由端侧 VAL 安全门控兜底。
+"""
+from __future__ import annotations
+import logging
+from typing import TYPE_CHECKING
+
+import grpc
+from google.protobuf.json_format import MessageToDict
+
+from runtime.grpcio import aio_channel
+from cockpit.agent.v1 import agent_pb2, agent_pb2_grpc
+from cockpit.common.v1 import common_pb2
+from .result import AgentResult
+
+if TYPE_CHECKING:
+    from .base import BaseAgent
+
+logger = logging.getLogger("sdk.agent_client")
+
+
+def _struct_to_dict(value) -> dict:
+    """protobuf Struct → 原生 dict。dict(struct.fields) 会留下 Value 对象（不可比较/取值），
+    必须用 MessageToDict 递归转换，否则 r.ui_card.get('type') 永远 != 'poi_list'。"""
+    if value is None:
+        return {}
+    return MessageToDict(value, preserving_proto_field_name=True)
+
+# 可观测：护栏拒绝时发审计 span（复用 observability/events.py）
+try:
+    from observability.events import get_emitter
+except Exception:  # pragma: no cover
+    get_emitter = None
+
+MAX_DEPTH = 2
+
+
+class AgentClient:
+    """受控的跨 Agent 调用客户端。"""
+
+    def __init__(self, caller: "BaseAgent", call_depth: int = 0,
+                 call_stack: list[str] = None, timeout: float = 10,
+                 registry=None, parent_meta: dict = None):
+        self._caller = caller
+        self._depth = call_depth
+        self._stack = call_stack or []
+        self._timeout = timeout
+        self._emitter = get_emitter("agent_client") if get_emitter else None
+        self._registry = registry  # RegistryClient for dynamic endpoint resolution
+        # 父请求 meta：转发会话上下文（定位/电量/trace 等）给子 Agent，
+        # 否则复合 Agent（如 trip-planner 内部调 charging）的子调用拿不到当前定位/真实电量。
+        self._parent_meta = parent_meta or {}
+
+    async def _emit_guardrail_event(self, reason: str, target: str,
+                                    meta: dict | None = None) -> None:
+        """护栏拒绝时发审计 span，进 collector→Dashboard trace 视图。"""
+        if not self._emitter:
+            return
+        try:
+            await self._emitter.emit_span(
+                trace_id=(meta or {}).get("trace_id", ""),
+                node="agent_client.guardrail",
+                status="error",
+                duration_ms=0,
+                attrs={"reason": reason, "target": target,
+                       "caller": self._caller.manifest.agent_id,
+                       "depth": self._depth, "stack": ",".join(self._stack)},
+                parent_id=(meta or {}).get("span_id", ""),
+            )
+        except Exception as e:  # pragma: no cover
+            logger.debug("emit guardrail span failed: %s", e)
+
+    async def call(self, agent_id: str, intent: str, slots: dict,
+                   ctx=None, timeout: float = None) -> AgentResult:
+        """调用指定 Agent 的指定意图。
+
+        Args:
+            agent_id: 目标 agent_id（kebab-case）
+            intent: 意图名（如 "navigation.search_poi"）
+            slots: 槽位
+            ctx: 上下文（可选，传 session_id 等）
+            timeout: 超时秒数（可选，覆盖默认）
+
+        Returns:
+            AgentResult
+        """
+        # 护栏 1：深度上限
+        if self._depth >= MAX_DEPTH:
+            logger.warning("Call depth exceeded (%d >= %d), rejecting call to %s",
+                           self._depth, MAX_DEPTH, agent_id)
+            await self._emit_guardrail_event("depth_exceeded", agent_id)
+            return AgentResult(status="failed", speech="调用深度超限，无法完成协作。")
+
+        # 护栏 2：环检测
+        caller_id = self._caller.manifest.agent_id
+        if agent_id in self._stack or agent_id == caller_id:
+            logger.warning("Circular call detected: %s -> %s (stack: %s)",
+                           caller_id, agent_id, self._stack)
+            await self._emit_guardrail_event("circular_call", agent_id)
+            return AgentResult(status="failed", speech="检测到循环调用，已中止。")
+
+        # 解析目标 endpoint（通过环境变量、Registry 或默认）
+        endpoint = await self._resolve_endpoint(agent_id)
+        if not endpoint:
+            return AgentResult(status="failed", speech=f"未找到 Agent: {agent_id}")
+
+        # 转发父请求会话上下文（定位/真实电量/trace 等）给子 Agent；call_depth/call_stack
+        # 由本层权威覆盖（护栏跨进程生效）。否则复合 Agent 的子调用会丢定位/电量，
+        # 例如 trip-planner 内部调 charging.plan 拿不到当前位置 → 误报"请开启定位"。
+        sub_meta = {k: str(v) for k, v in self._parent_meta.items()
+                    if k not in ("call_depth", "call_stack")}
+        sub_meta["call_depth"] = str(self._depth + 1)
+        sub_meta["call_stack"] = ",".join(self._stack + [caller_id])
+
+        # 构建请求
+        req = agent_pb2.ExecuteRequest(
+            session_id=ctx.session_id if ctx else "",
+            intent=common_pb2.Intent(name=intent, slots=slots, raw_text="", confidence=0.9),
+            context=common_pb2.ContextRef(
+                session_id=ctx.session_id if ctx else "",
+                user_id=ctx.user_id if ctx else "",
+                vehicle_id=ctx.vehicle_id if ctx else "",
+            ),
+            meta=sub_meta,
+        )
+
+        # 调用（带超时）。channel 按 endpoint 复用（缓存在长生命周期的 caller 上），
+        # 避免每次调用新建且从不关闭导致的连接/fd 泄漏（trip-planner 等每轮调多个叶子 Agent）。
+        try:
+            ch = self._channel_for(endpoint)
+            stub = agent_pb2_grpc.AgentStub(ch)
+            resp = await stub.Execute(req, timeout=timeout or self._timeout)
+        except grpc.aio.AioRpcError as e:
+            # grpc.aio 用 AioRpcError(DEADLINE_EXCEEDED) 表达超时，而非 asyncio.TimeoutError。
+            if e.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
+                logger.warning("Agent %s timed out", agent_id)
+                return AgentResult(status="failed", speech=f"Agent {agent_id} 响应超时。")
+            logger.warning("Agent %s call failed: %s", agent_id, e.code().name)
+            return AgentResult(status="failed",
+                               speech=f"调用失败: {e.details() or e.code().name}")
+        except Exception as e:
+            logger.warning("Agent %s call failed: %s", agent_id, e)
+            return AgentResult(status="failed", speech=f"调用失败: {e}")
+
+        # 转换响应
+        status_map = {0: "ok", 1: "need_confirm", 2: "need_slot", 3: "failed", 4: "rejected"}
+        actions = [
+            {"type": a.type, "payload": _struct_to_dict(a.payload),
+             "require_confirm": a.require_confirm}
+            for a in resp.actions
+        ]
+        return AgentResult(
+            status=status_map.get(resp.status, "failed"),
+            speech=resp.speech,
+            ui_card=_struct_to_dict(resp.ui_card) or None,
+            actions=actions,
+            follow_up=resp.follow_up,
+        )
+
+    def _channel_for(self, endpoint: str):
+        """按 endpoint 复用 keepalive channel，缓存在长生命周期的 caller(BaseAgent) 上。
+
+        AgentClient 每请求新建（见 BaseAgent.agents），故 channel 不能缓存在自身，
+        否则等于每次新建；缓存到 caller 才能跨请求复用。keepalive 让被调 Agent 重启
+        换 IP 后旧 channel 自动重连重解析，不需重启调用方。"""
+        cache = getattr(self._caller, "_agent_channels", None)
+        if cache is None:
+            cache = {}
+            try:
+                self._caller._agent_channels = cache
+            except Exception:  # caller 不可写属性（极端测试桩）→ 退化为本次新建
+                pass
+        ch = cache.get(endpoint)
+        if ch is None:
+            ch = aio_channel(endpoint)
+            cache[endpoint] = ch
+        return ch
+
+    async def _resolve_endpoint(self, agent_id: str) -> str:
+        """解析目标 Agent 的 endpoint（ws2 三级优先级）。
+
+        1. <AGENT_ID>_ENDPOINT env（本地调试）
+        2. RegistryClient 动态解析
+        3. port_map 硬编码 fallback（PoC 兜底）
+        """
+        import os
+        # 1. 环境变量优先
+        env_key = f"{agent_id.upper().replace('-', '_')}_ENDPOINT"
+        endpoint = os.getenv(env_key)
+        if endpoint:
+            return endpoint
+
+        # 2. 经 Registry 动态解析
+        if self._registry:
+            try:
+                resp = await self._registry.resolve(intent="", query="", top_k=20)
+                for a in resp:
+                    if hasattr(a, "manifest") and a.manifest.agent_id == agent_id:
+                        return a.endpoint
+                    # dict 格式（fallback）
+                    if isinstance(a, dict) and a.get("agent_id") == agent_id:
+                        return a.get("endpoint", "")
+            except Exception as e:
+                logger.debug("Registry resolve failed for %s: %s", agent_id, e)
+
+        # 3. 硬编码 port_map fallback（PoC 兜底）
+        port_map = {
+            "navigation": "50061", "chitchat": "50062",
+            "nearby": "50063", "parking-payment": "50064",
+            "manual-rag": "50065", "trip-planner": "50066", "info": "50067",
+            "charging-planner": "50068", "scene-orchestrator": "50069",
+            "road-safety": "50072", "ticketing": "50073",
+        }
+        port = port_map.get(agent_id)
+        if port:
+            return f"localhost:{port}"
+        return ""
+
+    def fork(self, target_agent_id: str) -> "AgentClient":
+        """创建子调用的 AgentClient（深度+1，栈扩展）。"""
+        return AgentClient(
+            caller=self._caller,
+            call_depth=self._depth + 1,
+            call_stack=self._stack + [self._caller.manifest.agent_id],
+            timeout=self._timeout,
+            registry=self._registry,
+            parent_meta=self._parent_meta,  # 透传会话上下文（定位/电量/trace），否则二级子调用丢失
+        )

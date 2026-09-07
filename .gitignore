@@ -1,0 +1,118 @@
+# Secrets
+.env
+*.local
+# 本地 API 密钥预检脚本（读取 .env、打印 key/token 前缀，纯本机运维工具，不入库）
+test_api_keys.py
+# 签名密钥：release keystore
+# 泄露=别人能签出装得上的冒名 APK。指纹（SHA-1）是公开值，密钥文件不是，别混。
+*.keystore
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Generated gRPC code (regenerate via `make proto`)
+**/gen/
+*_pb2.py
+*_pb2_grpc.py
+*.pb.go
+
+# Go
+bin/
+*.test
+vendor/
+
+# Node / HMI
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+
+# 端侧语音模型（KWS/VAD，本地放置），切勿提交（体积 + 许可）
+hmi/public/models/*
+!hmi/public/models/.gitkeep
+# sherpa-onnx WASM 探针页——本地临时、不合入
+hmi/public/voice-probe/
+# 服务端声纹模型（CAM++ ONNX 28MB），本地放置，切勿提交。
+# 缺失时 llm-gateway 声纹面决议为 disabled、整链逐字回落，故不阻塞构建。
+# **目录必须留在版本库**（.gitkeep）：llm-gateway/Dockerfile 有 `COPY models`，
+# 目录不存在则新克隆构建直接失败。故逐层排除——Git 无法在已排除的父目录里重新包含文件。
+models/*
+!models/voiceprint/
+models/voiceprint/*
+!models/voiceprint/.gitkeep
+# 端侧语义 NLU 模型（本地训练/拉取产物）；
+# 缺失不阻塞——决议 disabled 整链回落，但目录要在（compose 只读挂载）
+!models/nlu/
+models/nlu/*
+!models/nlu/.gitkeep
+# manual-rag 私有手册索引：由离线构建从有权使用的 PDF 生成。
+# 源 PDF 与抽取正文均不得进 Git；只跟踪目录说明和占位，保证 Docker COPY 在新克隆可用。
+!models/manual_rag/
+models/manual_rag/*
+!models/manual_rag/.gitkeep
+!models/manual_rag/README.md
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Claude Code 本地配置（个人权限清单/运行时锁，机器本地不共享）
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+
+# Logs
+*.log
+feishu_*.json
+
+# Collector SQLite 持久化正常落容器卷；误在宿主仓库目录直跑时的保险
+*.sqlite3
+
+# TLS certs (mTLS, R3.2) — generated locally; NEVER commit keys/certs
+certs/*.crt
+certs/*.key
+certs/*.pem
+certs/*.csr
+certs/*.srl
+
+# Brainstorm visual companion (ephemeral mockups)
+.superpowers/
+
+# Isolated feature worktrees
+.worktrees/
+
+# KWS 唤醒词 WASM 运行时（本地构建产物，勿提交）
+hmi/public/kws/
+
+# 本机 compose 应急 override（winnat 端口保留区等，见文件头注释）
+compose.*.local.yaml
+
+# AI 协作者的会话级续跑交接（codex agent 产出）。它记的是**某一次会话**的暂停/恢复
+# 状态（当前分支、跑到哪一步、下次从哪继续），不是项目事实——项目事实的唯一去处是
+# 仓库根 README/AGENTS 与 docs/。留在仓库里只会与正式文档争夺「谁是真相源」，
+# 且过期得比谁都快。取消跟踪（文件保留在工作树，历史不动）。
+.codex-resume.md
+
+# 本 AI 编码助手（code-tui）的会话运行时状态：model.json 是模型配置，
+# sessions/ 记录对话过程——与 .codex-resume.md 同理属会话级状态，不入库
+.codetui/
+
+# Private release/data-migration artifacts; never commit.
+.artifacts/
+
+# 下载/构建的中间产物缓存——产物本身已按各自的 .gitignore 落地，切勿提交。
+.cache/
+
+# 和风天气密钥文件
+qweather_public.pem
+qweather_private.pem
+
+ed25519-private.pem
+ed25519-public.pem

@@ -1,0 +1,184 @@
+# 范例库 · mcd 域（麦当劳官方 MCP，2026-08-11 真机核实激活）
+# 契约 skills/exemplars/README.md；只追加不插入（eid=<domain>#序号）。
+# 只读三件（mcd.menu=**当店菜单带价格**、mcd.nutrition=营养成分、
+# mcd.order_status=订单查询）与复合下单
+# mcd.order 已接通；「附近有麦当劳」仍归 nearby.search（高德）——
+# 边界范例刻意各给一条，防新域把发现类话术吸走。
+domain: mcd
+exemplars:
+- text: 麦当劳有什么吃的
+  plan:
+  - agent: mcp-bridge
+    intent: mcd.menu
+  source: manifest
+  added: '2026-08-11'
+  tags:
+  - canonical
+- text: 巨无霸多少大卡
+  plan:
+  - agent: mcp-bridge
+    intent: mcd.nutrition
+  source: manifest
+  added: '2026-08-11'
+  tags:
+  - canonical
+- text: 麦当劳哪个套餐热量低一点
+  plan:
+  - agent: mcp-bridge
+    intent: mcd.nutrition
+  source: manifest
+  added: '2026-08-11'
+  tags:
+  - canonical
+- text: 我的麦当劳订单到哪了
+  plan:
+  - agent: mcp-bridge
+    intent: mcd.order_status
+  source: manifest
+  added: '2026-08-11'
+  tags:
+  - canonical
+- text: 麦当劳那单好了没有
+  plan:
+  - agent: mcp-bridge
+    intent: mcd.order_status
+  source: manifest
+  added: '2026-08-11'
+  tags:
+  - canonical
+- text: 帮我在麦当劳国贸店点一份板烧鸡腿堡，到店自取
+  plan:
+  - agent: mcp-bridge
+    intent: mcd.order
+    slots:
+      item_query: 板烧鸡腿堡
+      store_hint: 国贸店
+      quantity: '1'
+      pickup_mode: 到店自取
+  source: manual
+  added: '2026-08-12'
+  tags:
+  - merchant-order
+- text: 麦当劳人民广场店来两份麦香鱼套餐，打包带走
+  plan:
+  - agent: mcp-bridge
+    intent: mcd.order
+    slots:
+      item_query: 麦香鱼套餐
+      store_hint: 人民广场店
+      quantity: '2'
+      pickup_mode: 打包带走
+  source: manual
+  added: '2026-08-12'
+  tags:
+  - merchant-order
+# 边界「附近有麦当劳吗」→ nearby.search **不进本文件**：范例契约要求首步 intent
+# 域==文件域（放这里=域错配红灯）。该边界由对抗语料
+# cc.boundary.nearby-burger-place / nearby-fastfood 与 mode_routing_cases 锁定；
+# nearby 域自身的范例已覆盖发现类话术。
+- text: 麦当劳的猪柳蛋麦满分多少钱
+  plan:
+  - agent: mcp-bridge
+    intent: mcd.menu
+  source: manual
+  added: '2026-08-13'
+  tags:
+  - merchant-menu
+- text: 这家麦当劳有什么可以点的
+  plan:
+  - agent: mcp-bridge
+    intent: mcd.menu
+  source: manual
+  added: '2026-08-13'
+  tags:
+  - merchant-menu
+# mcd.menu（2026-08-13）从营养表改成**当店菜单**：官方 query-meals 带 currentPrice
+# 与商品图，能回答用户真正在问的「有什么、多少钱」。营养成分归 mcd.nutrition
+# ——「早餐的猪柳蛋麦满分多少钱」曾只能回「这个接口里只有营养信息」（trace c523c303）。
+# ── 2026-08-13 demo-mkemhn 收口：选店闭环（麦当劳 store_hint 直达，无需坐标链）──
+- text: 选择麦当劳门店：碧海君庭餐厅
+  plan:
+  - agent: mcp-bridge
+    intent: mcd.menu
+    slots:
+      store_hint: 碧海君庭餐厅
+  source: trace
+  added: '2026-08-13'
+  tags:
+  - badcase
+  note: 候选卡按钮固定句式必须恒久可用；麦当劳按 store_hint 文本选店（看菜单是最安全续接）
+- text: 看看麦当劳科苑南路餐厅的菜单
+  plan:
+  - agent: mcp-bridge
+    intent: mcd.menu
+    slots:
+      store_hint: 科苑南路餐厅
+  source: trace
+  added: '2026-08-13'
+  tags:
+  - merchant-menu
+  note: 指名门店看菜单直达 store_hint，不需要先跑附近搜索
+- text: 换一家麦当劳门店，还是点蘸酱麦辣大四角
+  plan:
+  - agent: mcp-bridge
+    intent: mcd.order
+    slots:
+      item_query: 蘸酱麦辣大四角
+  source: trace
+  added: '2026-08-13'
+  tags:
+  - badcase
+  note: 换店保商品：不带 store_hint 走门店重选（桥内多店出候选卡），商品随句携带
+# ── 2026-08-13 demo-3ukshz 二轮：附近接线 + 分类导航 ─────────────────────────────
+# 「附近的麦当劳…」此前被教成单步 mcd.menu（servers.yaml 旧 example），而桥拿不到
+# 位置（GPS 不下发第三方），官方接口无线索时给**默认店**——「附近」答成十公里外的
+# 碧海君庭（trace ffecdf55）。正解与瑞幸同构：nearby.search（有车辆位置）供门店名，
+# store_hint 文本直达（麦当劳按名查店，无需坐标 provenance）。
+- text: 附近的麦当劳有什么菜单
+  plan:
+  - id: store
+    agent: nearby
+    intent: nearby.search
+    slots:
+      keyword: 麦当劳
+  - id: menu
+    agent: mcp-bridge
+    intent: mcd.menu
+    depends_on: [store]
+    slot_refs:
+      store_hint: store.data.items.0.name
+  source: trace
+  added: '2026-08-13'
+  tags:
+  - badcase
+  note: demo-3ukshz ffecdf55——附近的麦当劳答成商户默认店碧海君庭
+- text: 我说的是我附近的麦当劳
+  plan:
+  - id: store
+    agent: nearby
+    intent: nearby.search
+    slots:
+      keyword: 麦当劳
+  - id: menu
+    agent: mcp-bridge
+    intent: mcd.menu
+    depends_on: [store]
+    slot_refs:
+      store_hint: store.data.items.0.name
+  source: trace
+  added: '2026-08-13'
+  tags:
+  - badcase
+  note: demo-3ukshz fb401678——用户纠正「我这里附近」曾落进拒识兜底
+- text: 看看麦当劳国贸店的甜品
+  plan:
+  - agent: mcp-bridge
+    intent: mcd.menu
+    slots:
+      store_hint: 国贸店
+      category: 甜品
+  source: manual
+  added: '2026-08-13'
+  tags:
+  - merchant-menu
+  note: 分类导航 chip 句式「看看{店}的{分类}」——store_hint 与 category 两槽分开填

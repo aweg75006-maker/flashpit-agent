@@ -1,0 +1,102 @@
+agent_id: trip-planner
+version: 0.1.0
+display_name: 行程规划
+category: ecosystem
+trust_level: first_party
+deployment: cloud
+latency_budget_ms: 40000   # 多日行程是 LLM 重生成（慢系统）；复杂任务动态开思考后更慢，给足 Execute 超时
+fallback: chitchat
+
+capabilities:
+  - intent: trip.plan
+    description: 规划多日自驾行程（目的地、天数、偏好），输出每日要点。凡"去X玩N天/N日游"
+      并带出行偏好(带老人/带娃/轻松/不要太累/悠闲)，即便同句还问天气/充电，行程规划也应单独成步。
+      「跟着《某剧》游X」「X同款打卡」这类影视/文化主题行程把主题名填 theme（会检索
+      主题相关真实地点编入行程）；只聊作品内容本身（好不好看/剧情）不是行程规划。
+      「先去A再去B」「A、B一路玩」多城市行程把城市按用户口述序连写填 destination
+      （如「杭州、苏州」）——顺序会被保留、逐城安排并算跨城驾驶段。用户点名要去的
+      具体地点/景点（含俗称，如「东方之门/大秋裤、灵山大佛、趵突泉」）顿号连写填
+      must_visit——会逐个接地并务必编入对应城市的行程。
+      **不归本条**：单点当天出行（「去万象城」「接孩子后去万象城」）是一次导航不是
+      多日行程——没有天数、没有过夜、只有一个目的地时归 navigation；接送人归
+      navigation.navigate_to。本条要的是**多天、多站、要过夜**的那种安排。
+    slots: [destination, days, preferences, theme, must_visit]
+    heavy: true    # 多日行程 LLM 重生成 → 开思考+过程区
+    examples: ["规划周末去杭州两日游", "帮我安排去三亚的行程", "周末带娃去近郊玩",
+               "周末去杭州两天带老人不要太累", "去成都玩三天轻松点",
+               "周末去杭州两天带老人，顺便看看天气和是否需要中途充电",
+               "跟着《太平年》游杭州", "先去杭州再去苏州玩四天"]
+  - intent: trip.modify
+    description: 修改已有行程（结构化局部编辑：换/加/删某个停靠点，只动受影响的天）
+    slots: [modification]
+    heavy: true    # 局部重规划仍走 LLM → 开思考+过程区
+    examples: ["第二天换成宋城", "不去千岛湖了", "加一个西湖", "删掉第三天的奥林匹克公园"]
+  - intent: trip.navigate
+    description: 导航到当前行程里的某个停靠点（『下一站』『导航去第二天的西湖』『第三天第一个』）。
+      仅在已有规划好的行程时由确定性路由命中，普通导航仍走 navigation。
+    slots: [day, stop, target]
+    examples: ["下一站", "导航去第二天的西湖", "第三天第一个", "去行程里的故宫"]
+  - intent: trip.status
+    description: 查询当前行程在途进度（在第几站/下一站/还剩几站/全程需补电几次）。只读，不改行程。
+      问「第N天有哪些安排/第二天去哪」时把天号填 day（只读那一天的停靠点，**不改行程**
+      ——改某一天归 trip.modify）。
+    slots: [day]
+    examples: ["行程到哪了", "还剩几站", "我在第几站", "还要充几次电",
+               "第二天有哪些安排", "第三天去哪几个地方"]
+  - intent: trip.reschedule
+    description: 在途精简剩余行程（时间不够/太累/想提前回）——确定性砍掉靠后的停靠点或最后一天，需二次确认。
+    slots: [hint]
+    examples: ["时间不够了", "太累了精简一下", "想提前回家", "今天少玩一个"]
+
+# 确定性路由（R2.1）：弱 LLM 常漏/误路由行程内意图（借历史目的地误判成天气/充电）。
+# 逐字迁移自原 planning 的 _TRIP_NAV_RE/_TRIP_NAV_BLOCK_RE/_TRIP_RESCHEDULE_RE/
+# _TRIP_STATUS_RE/_TRIP_MODIFY_RE（_ensure_trip_navigate/reschedule/status/modify）。
+# 均 replace（互斥、取代误规划）；priority 复刻原判定顺序 navigate>reschedule>status>modify。
+# trip.plan（append，需目的地抽取）见 P2c。
+route_hints:
+  # 【trip.navigate 的 route_hint 已于 2026-07-29 退役】判据：双臂裸跑
+  #   deepseek:deepseek-v4-flash / minimax:MiniMax-M3 各 ×2 轮，其 4 条命中语料**全覆盖**
+  #   （非抽样——抽 3 句会系统性高估，命中面越大的规则越容易被放行）；
+  #   摘掉它之后仍全部落对 → 模型 + 范例已经自己会了。
+  #   ⚠ 证据只覆盖上述两档。本 hint 家族当初是为 **MiMo** 写的
+  #     （route_hints.py 开篇：「弱 LLM（MiMo）常漏/误路由」），而本环境
+  #     MiMo 无可用 key（探针 all models failed），**切回 MiMo 须复验**。
+  #   回归保护未删：命中句已改端到端口径迁入 mode_routing_cases.yaml。
+  #   要恢复：git log -S '下一站|下个景点|继续导航|(?:导航|带我去|' 找回原块。
+  - pattern: '时间不够|来不及|赶不及|太累了|好累|累坏|累死|提前回|早点回|早些回|提前结束|精简.{0,2}行程|简化行程|行程太满|玩不完|少玩|少去'
+    intent: trip.reschedule
+    policy: replace
+    priority: 80
+    slots: {hint: "$text"}
+  # 【trip.status 的 route_hint 已于 2026-07-29 退役】判据：双臂裸跑
+  #   deepseek:deepseek-v4-flash / minimax:MiniMax-M3 各 ×2 轮，其 3 条命中语料**全覆盖**
+  #   （非抽样——抽 3 句会系统性高估，命中面越大的规则越容易被放行）；
+  #   摘掉它之后仍全部落对 → 模型 + 范例已经自己会了。
+  #   ⚠ 证据只覆盖上述两档。本 hint 家族当初是为 **MiMo** 写的
+  #     （route_hints.py 开篇：「弱 LLM（MiMo）常漏/误路由」），而本环境
+  #     MiMo 无可用 key（探针 all models failed），**切回 MiMo 须复验**。
+  #   回归保护未删：命中句已改端到端口径迁入 mode_routing_cases.yaml。
+  #   要恢复：git log -S '行程(到哪|进度|还剩|还有|怎么样)|还剩几[' 找回原块。
+  # 【trip.modify 的 route_hint 已于 2026-07-29 退役】判据：双臂裸跑
+  #   deepseek:deepseek-v4-flash / minimax:MiniMax-M3 各 ×2 轮，其 3 条命中语料**全覆盖**
+  #   （非抽样——抽 3 句会系统性高估，命中面越大的规则越容易被放行）；
+  #   摘掉它之后仍全部落对 → 模型 + 范例已经自己会了。
+  #   ⚠ 证据只覆盖上述两档。本 hint 家族当初是为 **MiMo** 写的
+  #     （route_hints.py 开篇：「弱 LLM（MiMo）常漏/误路由」），而本环境
+  #     MiMo 无可用 key（探针 all models failed），**切回 MiMo 须复验**。
+  #   回归保护未删：命中句已改端到端口径迁入 mode_routing_cases.yaml。
+  #   要恢复：git log -S '第\s*[一二两三四五六七八九十\d]+\s*天' 找回原块。
+  # 【trip.plan 的 route_hint 已于 2026-07-29 退役】判据：双臂裸跑
+  #   deepseek:deepseek-v4-flash / minimax:MiniMax-M3 各 ×2 轮，其 13 条命中语料**全覆盖**
+  #   （非抽样——抽 3 句会系统性高估，命中面越大的规则越容易被放行）；
+  #   摘掉它之后仍全部落对 → 模型 + 范例已经自己会了。
+  #   ⚠ 证据只覆盖上述两档。本 hint 家族当初是为 **MiMo** 写的
+  #     （route_hints.py 开篇：「弱 LLM（MiMo）常漏/误路由」），而本环境
+  #     MiMo 无可用 key（探针 all models failed），**切回 MiMo 须复验**。
+  #   回归保护未删：命中句已改端到端口径迁入 mode_routing_cases.yaml。
+  #   要恢复：git log -S '(?=.*(?:去|到|赴|游)[一-鿿]{2,' 找回原块。
+requires_permissions:
+  - location.read
+  - network.external
+edge_intents: []
+context_scopes: [location, vehicle_state]   # 透传给子 agent（navigation/charging）

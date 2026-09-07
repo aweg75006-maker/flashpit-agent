@@ -1,0 +1,2 @@
+# 部署脚本保持 LF 行尾（Windows/容器兼容）
+deploy/cloud/*.sh text eol=lf

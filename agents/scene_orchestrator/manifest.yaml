@@ -1,0 +1,113 @@
+agent_id: scene-orchestrator
+version: 0.2.0
+display_name: 场景助手
+category: core
+trust_level: first_party
+deployment: cloud
+latency_budget_ms: 20000    # 激活/退出毫秒级（零 LLM）；create/update 编译一跳 primary 模型留余量
+fallback: chitchat
+
+capabilities:
+  - intent: scene.create
+    description: 用一句话创建自定义场景模式（钓鱼模式/观星模式），说清要做哪些事
+      （座椅放平、空调温度、氛围灯亮度、香氛、车窗、音乐…），保存后随叫随到。
+      场景本身可以带触发条件（「电量低于20%的时候提醒我开」「每天中午12点提醒我」）——
+      **这类话整句都属于创建场景，触发条件由场景自己管，不要再拆一条提醒（reminder）出来**。
+      反界定：「记住，我最喜欢的空调温度是26度」这类**个人偏好陈述**（无场景名、无动作集、
+      只是让你记住一个喜好）不是创建场景——归闲聊应答即可，偏好由记忆系统自动沉淀。
+    slots: [name, spec]
+    examples: ["帮我创建一个钓鱼模式：座椅放平、开外循环、氛围灯调到10%",
+               "新建观星模式：氛围灯关掉，座椅放倒，空调22度",
+               "自定义一个遛狗模式：车窗开一半，空调外循环",
+               "创建省电出行模式：关掉氛围灯、空调26度，电量低于20%的时候提醒我开"]
+  - intent: scene.activate
+    description: 开启场景模式（自建的或内置的）。用户同句给出的温度、灯光等覆盖参数属于
+      custom_params，必须与场景激活保留在同一个 scene.activate 步骤里，不要拆成独立车控步骤，
+      否则场景默认值与覆盖值会发生并发覆盖。
+    slots: [scene, custom_params]
+    examples: ["开启回家模式", "露营模式", "午休模式", "来个钓鱼模式", "打开浪漫模式",
+               "开启午休模式，温度26"]
+  - intent: scene.deactivate
+    description: 退出当前场景模式，把座椅/空调/灯光恢复到开启前的样子
+    slots: [scene]
+    examples: ["退出露营模式", "关闭午休模式", "退出场景"]
+  - intent: scene.update
+    description: 修改已有自建场景的动作或参数
+    slots: [scene, modification]
+    examples: ["把钓鱼模式的温度改成24", "钓鱼模式再加一个开香氛", "观星模式去掉座椅放平"]
+  - intent: scene.delete
+    description: 删除自建场景（需二次确认）
+    slots: [scene]
+    examples: ["删掉钓鱼模式", "不要观星模式了"]
+  - intent: scene.list
+    description: 列出可用的场景模式（我建的 / 内置的）
+    slots: []
+    examples: ["有哪些场景模式", "我能用什么模式", "看看我的场景"]
+
+# 确定性路由（R2.1）：弱 LLM 会把「X模式」三字短语漏成 chitchat。
+# **guard 的核心职责是 D8 端云分工**：驾驶/动力类模式词（运动/省电/雪地…）是端侧
+# LOCAL_INTENTS（driving_mode.set / power_mode.set，毫秒级秒回），云端 hint 必须让路——
+# 否则会把端侧秒回劫持成 1.5s 云端往返，违反 L0 时延约束。
+# pattern 以对抗语料实测收敛。
+route_hints:
+  # 创建（priority 最高）：
+  # - 高于激活(54)：「创建钓鱼模式」两条都命中，必须走 create；
+  # - **高于 reminder.create(56)**：「创建省电出行模式：…电量低于20%的时候提醒我开」里的
+  #   「提醒我」是**触发器的描述**，不是要建一条提醒。不压过它的话，reminder 会抢走并追问
+  #   「什么时候提醒你」，把会话挂起、后续的「确认」全被它吃掉（真栈 e2e 实测级联翻车）。
+  #   反过来「创建一个提醒：明天开午休模式」不会误命中——pattern 要求 6 字内紧跟「模式」。
+  - pattern: '(创建|新建|自定义|帮我建|建一个|建个|做一个|做个|存成|存为)[^。]{0,6}模式'
+    intent: scene.create
+    policy: replace
+    priority: 58
+    guard: '是什么|什么意思|怎么(用|开|关)'
+    slots: {name: "$text", spec: "$text"}
+  # 激活：「开启/打开/进入/来个 X模式」或裸「X模式」。
+  # 裸分支的否定前瞻是必需的：没有它，「退出露营模式」里的「退出露营」正好是 2~6 个汉字，
+  # 整句会被 `^[一-龥]{2,6}模式$` 吞掉误判成激活（eval 实测命中）。
+  # 【scene.activate 的 route_hint 已于 2026-07-29 退役】判据：双臂裸跑
+  #   deepseek:deepseek-v4-flash / minimax:MiniMax-M3 各 ×2 轮，其 8 条命中语料**全覆盖**
+  #   （非抽样——抽 3 句会系统性高估，命中面越大的规则越容易被放行）；
+  #   摘掉它之后仍全部落对 → 模型 + 范例已经自己会了。
+  #   ⚠ 证据只覆盖上述两档。本 hint 家族当初是为 **MiMo** 写的
+  #     （route_hints.py 开篇：「弱 LLM（MiMo）常漏/误路由」），而本环境
+  #     MiMo 无可用 key（探针 all models failed），**切回 MiMo 须复验**。
+  #   回归保护未删：命中句已改端到端口径迁入 mode_routing_cases.yaml。
+  #   要恢复：git log -S '(开启|打开|进入|切换到|来个|来一个|启动)' 找回原块。
+  # 【scene.deactivate 的 route_hint 已于 2026-07-29 退役】判据：双臂裸跑
+  #   deepseek:deepseek-v4-flash / minimax:MiniMax-M3 各 ×2 轮，其 2 条命中语料**全覆盖**
+  #   （非抽样——抽 3 句会系统性高估，命中面越大的规则越容易被放行）；
+  #   摘掉它之后仍全部落对 → 模型 + 范例已经自己会了。
+  #   ⚠ 证据只覆盖上述两档。本 hint 家族当初是为 **MiMo** 写的
+  #     （route_hints.py 开篇：「弱 LLM（MiMo）常漏/误路由」），而本环境
+  #     MiMo 无可用 key（探针 all models failed），**切回 MiMo 须复验**。
+  #   回归保护未删：命中句已改端到端口径迁入 mode_routing_cases.yaml。
+  #   要恢复：git log -S '(退出|关闭|取消|结束)\s*[一-龥]{0,' 找回原块。
+  # 【scene.update 的 route_hint 已于 2026-07-29 退役】判据：双臂裸跑
+  #   deepseek:deepseek-v4-flash / minimax:MiniMax-M3 各 ×2 轮，其 4 条命中语料**全覆盖**
+  #   （非抽样——抽 3 句会系统性高估，命中面越大的规则越容易被放行）；
+  #   摘掉它之后仍全部落对 → 模型 + 范例已经自己会了。
+  #   ⚠ 证据只覆盖上述两档。本 hint 家族当初是为 **MiMo** 写的
+  #     （route_hints.py 开篇：「弱 LLM（MiMo）常漏/误路由」），而本环境
+  #     MiMo 无可用 key（探针 all models failed），**切回 MiMo 须复验**。
+  #   回归保护未删：命中句已改端到端口径迁入 mode_routing_cases.yaml。
+  #   要恢复：git log -S '[一-龥]{1,6}模式(的)?[^。]{0,1' 找回原块。
+  # 【scene.delete 的 route_hint 已于 2026-07-29 退役】判据：双臂裸跑
+  #   deepseek:deepseek-v4-flash / minimax:MiniMax-M3 各 ×2 轮，其 2 条命中语料**全覆盖**
+  #   （非抽样——抽 3 句会系统性高估，命中面越大的规则越容易被放行）；
+  #   摘掉它之后仍全部落对 → 模型 + 范例已经自己会了。
+  #   ⚠ 证据只覆盖上述两档。本 hint 家族当初是为 **MiMo** 写的
+  #     （route_hints.py 开篇：「弱 LLM（MiMo）常漏/误路由」），而本环境
+  #     MiMo 无可用 key（探针 all models failed），**切回 MiMo 须复验**。
+  #   回归保护未删：命中句已改端到端口径迁入 mode_routing_cases.yaml。
+  #   要恢复：git log -S '(删掉|删除|去掉|不要)\s*[一-龥]{1,' 找回原块。
+requires_permissions:
+  - vehicle.control        # 场景展开为车控动作（真正下发仍由端侧 VAL 门控）
+  - media.control          # P1.4 起场景可含媒体动作（浪漫模式 media.play，端侧回流已放开）
+  - navigation.control     # 回家模式含导航动作
+  - profile.read           # 用户场景属用户数据域 + shared_state 经 profile KV
+  - profile.write
+edge_intents: []
+# 激活前采车况快照（deactivate 真恢复的基准）；电量经 meta.vehicle_battery 下发。
+# 注：车况全量镜像走 NATS vehicle.state.changed（src/state_mirror.py），memory 无此 scope。
+context_scopes: [vehicle_state]

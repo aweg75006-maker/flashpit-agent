@@ -1,0 +1,370 @@
+# 范例库 · info 域（M5 P1 数据飞轮）
+# 契约 skills/exemplars/README.md；只追加不插入（eid=<domain>#序号，插队会让历史日报的 eid 指错条目）。
+domain: info
+exemplars:
+- text: PM2.5多少
+  plan:
+  - agent: info
+    intent: info.air_quality
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 上海现在多少度
+  plan:
+  - agent: info
+    intent: info.weather
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 上证指数多少
+  plan:
+  - agent: info
+    intent: info.stock
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 世界杯比分
+  plan:
+  - agent: info
+    intent: info.sports
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 今天世界杯赛程
+  plan:
+  - agent: info
+    intent: info.sports
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 今天大盘怎么样
+  plan:
+  - agent: info
+    intent: info.stock
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 今天天气怎么样
+  plan:
+  - agent: info
+    intent: info.weather
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 今天有什么新闻
+  plan:
+  - agent: info
+    intent: info.news
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 今天有极端天气吗
+  plan:
+  - agent: info
+    intent: info.alerts
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 今天空气好吗
+  plan:
+  - agent: info
+    intent: info.air_quality
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 今天适合运动吗
+  plan:
+  - agent: info
+    intent: info.indices
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 北京天气如何
+  plan:
+  - agent: info
+    intent: info.weather
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 北京有暴雨预警吗
+  plan:
+  - agent: info
+    intent: info.alerts
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 北京未来三天天气
+  plan:
+  - agent: info
+    intent: info.forecast
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 后天会下雨吗
+  plan:
+  - agent: info
+    intent: info.forecast
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 帮我搜
+  plan:
+  - agent: info
+    intent: info.search
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 帮我查一下iPhone现在的价格
+  plan:
+  - agent: info
+    intent: info.search
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 搜一下固态电池最新进展
+  plan:
+  - agent: info
+    intent: info.search
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 明天可以洗车吗
+  plan:
+  - agent: info
+    intent: info.indices
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 明天天气怎么样
+  plan:
+  - agent: info
+    intent: info.forecast
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 昨晚发布会都发布了什么
+  plan:
+  - agent: info
+    intent: info.search
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 最新头条
+  plan:
+  - agent: info
+    intent: info.news
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 有没有天气预警
+  plan:
+  - agent: info
+    intent: info.alerts
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 来点财经新闻
+  plan:
+  - agent: info
+    intent: info.news
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 查一下苹果股票
+  plan:
+  - agent: info
+    intent: info.stock
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 欧冠今晚有哪些比赛
+  plan:
+  - agent: info
+    intent: info.sports
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 现在油价多少
+  plan:
+  - agent: info
+    intent: info.search
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 生活指数
+  plan:
+  - agent: info
+    intent: info.indices
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 看看新闻
+  plan:
+  - agent: info
+    intent: info.news
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 科技新闻
+  plan:
+  - agent: info
+    intent: info.news
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 空气质量
+  plan:
+  - agent: info
+    intent: info.air_quality
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 空气质量怎么样
+  plan:
+  - agent: info
+    intent: info.air_quality
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 紫外线强不强
+  plan:
+  - agent: info
+    intent: info.indices
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 英伟达最新消息
+  plan:
+  - agent: info
+    intent: info.news
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 英超赛果
+  plan:
+  - agent: info
+    intent: info.sports
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 茅台股价
+  plan:
+  - agent: info
+    intent: info.stock
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 西甲对阵
+  plan:
+  - agent: info
+    intent: info.sports
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 这周天气预报
+  plan:
+  - agent: info
+    intent: info.forecast
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+# 2026-07-30 地盘收口：这条原在 safety.yaml 标 safety.weather_alert——裸问预警本身归本域，
+# safety 的判别特征是「预警对驾驶的影响」（见 skills/exemplars/safety.yaml 同日注释）。
+- text: 暴雨预警了吗
+  plan:
+  - agent: info
+    intent: info.alerts
+  source: manifest
+  added: '2026-07-30'
+  tags:
+  - canonical
+  note: 原标 safety.weather_alert，2026-07-30 改判
+- text: 今天中超第一场是谁踢？开赛前提醒我
+  plan:
+  - agent: info
+    intent: info.sports
+  - agent: reminder
+    intent: reminder.create
+    slots:
+      time_text: 开赛前
+  source: trace
+  added: '2026-07-31'
+  tags:
+  - badcase
+  note: M-A A2-2b 曾被只落 reminder.create 后反问时间；赛事必须先产 REMINDABLE_ACTIVE
+# 2026-08-02：对抗测试 ki.hint.no-hijack-sports「昨晚国安打成几比几」在 info.sports 与
+# info.search 之间抖（unstable）。既有赛事范例全是**赛事专名**（世界杯/欧冠/英超/西甲），
+# 没有一条是「中超球队 + 口语比分问法」——**这不是路由错，是说法没见过**，按 M5 分工投范例。
+# 说法避开语料原句（原句用「打成几比几」，这里用「几比几赢的」）。
+- text: 昨天国安几比几赢的
+  plan:
+  - agent: info
+    intent: info.sports
+  source: manual
+  added: '2026-08-02'
+  tags:
+  - badcase
+  note: 中超球队 + 口语比分问法，此前落 info.search
+# ── 2026-08-04 补：过去时的**泛指**赛事问法 ─────────────────────────────────
+# 立卡来源 nq.match.past（对抗语料 stable，A3 时态）：5 趟 live 只过 1 趟，其余落
+# `info.search`，诊断行 `exemplars=[]`。既有 7 条赛事范例要么带**赛事专名**
+# （世界杯/欧冠/英超/西甲），要么带**球队名**（国安）——**没有一条是「那场比赛」这种
+# 泛指**。而泛指正是时态攻击的载体：句子里唯一的信息就是「昨天」+「比赛」。
+# 说法避开语料原句（原句问「结果是多少」，这里问「谁赢了」）。
+- text: 昨天那场球谁赢了
+  plan:
+  - agent: info
+    intent: info.sports
+  source: manual
+  added: '2026-08-04'
+  tags:
+  - badcase
+  note: 泛指 + 过去时，此前落 info.search
+# 第一条泛指过去赛果已被注入仍有跨进程方差；再补一个不同时态/问法的非语料变体。
+- text: 前天那场球赛最后谁拿下了
+  plan:
+  - agent: info
+    intent: info.sports
+  source: manual
+  added: '2026-08-05'
+  tags:
+  - badcase
+  note: 泛指 + 过去赛果的第二个非原句形态

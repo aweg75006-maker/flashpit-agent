@@ -1,0 +1,71 @@
+name: charging-strategy
+type: guide
+description: 充电找桩与长途补能策略的分流判据（附近找桩补电/跨城长途怎么充电、路上电够不够/目的地附近充电）
+priority: 55
+capability_dependencies: [charging.find, charging.plan, charging.status, navigation.navigate_to]
+keywords: [充电, 充电桩, 充电站, 快充, 补能, 没电, 耗尽, 耗空, 电量不, 怎么充]
+# 依据：charging-planner manifest 三能力语义 + journeys target_b B2 族校准记录
+# （「去X怎么充电」真栈探针 6/6 稳定走 charging.plan；charging 无 route_hints，路由纯 LLM
+# ——这正是本 guide 存在的原因）。「去X的路上找个充电站」形态刻意不写死：校准记录认定
+# navigation 途经点流对该句也是合理体验，知识只分流清晰形态。
+knowledge: |
+  **充电分流**：
+  - **耗尽陈述**就是补能求助 → charging.find，**不是 charging.status**；要求就近补电也归
+  charging.find。只看附近设施归周边发现；跨城补能 → charging.plan，不是只找一个桩。
+  **目的地续航判断由路线能力一次完成**：『看看电够不够到 X，不够再补能』直接输出
+  charging.plan(destination=X)，complexity=simple。该能力读取当前车辆状态、当前位置与真实路线距离：
+  续航够时返回无需途中补电，续航不足时自己给出沿途充电点。不要先调用 charging.status 再让
+  Planner 猜路线距离——charging.status 只返回当前电量，不接收目的地。目的地只是判据，绝不扩成
+  navigation.navigate_to 或任何导航搜索。
+  - 导航去某地并在当地充 → navigation.navigate_to 与 charging.find(destination=该地) 并列。
+  只问电量/续航 → charging.status，不要找桩。
+  **只有车的补能归充电域**：手机/耳机/笔记本/充电宝快没电，绝不出 charging.find/charging.plan。
+few_shots:
+  - user: 动力电池已经耗尽
+    plan: {"steps":[{"id":"s1","agent_id":"charging-planner","intent":"charging.find","slots":{},"depends_on":[],"slot_refs":{}}]}
+  # 路线能力自己消费车辆状态与路线距离；不拆成虚构的 status → replan 两轮。
+  - user: 先确认续航能不能到无锡，不足再找快充
+    plan: {"complexity":"simple","steps":[{"id":"s1","agent_id":"charging-planner","intent":"charging.plan","slots":{"destination":"无锡"},"depends_on":[],"slot_refs":{}}]}
+  - user: 先找个可用快充，选好后带我过去
+    plan: {"complexity":"simple","steps":[{"id":"s1","agent_id":"charging-planner","intent":"charging.find","slots":{},"depends_on":[],"slot_refs":{}},{"id":"s2","agent_id":"navigation","intent":"navigation.navigate_to","slots":{},"depends_on":["s1"],"slot_refs":{"destination":"s1.data.items.0.name"}}]}
+# 只连接模型已选出的唯一找桩步和导航步，不新增任何 intent。
+plan_repairs:
+  - kind: dependency_slot_ref
+    trigger_any: [选好后带我过去, 选好后导航, 然后导航过去, 再导航过去]
+    producer_intent: charging.find
+    consumer_intent: navigation.navigate_to
+    slot: destination
+    source_path: data.items.0.name
+golden:
+  - text: 去惠州怎么充电
+    expect_intents: [charging.plan]
+    expect_not: [charging.find]
+  - text: 快没电了，附近找个快充
+    expect_intents: [charging.find]
+    expect_not: [navigation.navigate_to, nearby.search]
+  - text: 动力电池彻底耗空了
+    expect_intents: [charging.find]
+    expect_not: [charging.status, nearby.search]
+  # holdout：避开 few-shot 原句与全部 keywords 字面（测泛化不测自证）。
+  # 「电快见底」句已被 charging.find hint 覆盖（canonical 哨兵，知识归因看下面两条）
+  - text: 电快见底了，就近找个地方充上
+    expect_intents: [charging.find]
+    expect_not: [nearby.search]
+    holdout: true
+  # hint 够不到的真 paraphrase（消融车道的知识归因载体：无 SOC 词形、无「怎么充电」）
+  - text: 去趟惠州中间要不要补个电
+    expect_intents: [charging.plan]
+    expect_not: [nearby.search]
+    holdout: true
+  # 目的地续航判断：非对抗原句；route-aware Agent 一次判断并按需生成补电点。
+  - text: 先看当前续航能不能撑到苏州，撑不到再找地方补上
+    expect_intents: [charging.plan]
+    expect_not: [charging.find, charging.status]
+    expect_complexity: simple
+    holdout: true
+  # 知识边界负例：设备充电绝不出车辆充电步（hint guard 挡确定性层，这条守 LLM 层）
+  - text: 手机快没电了，附近找个地方充一下
+    expect_not: [charging.find, charging.plan]
+    holdout: true
+owner: charging-planner
+version: 6

@@ -1,0 +1,531 @@
+"""SQLite 持久层：turns / spans / llm_calls / logs 落盘与查询。
+
+选型：
+- stdlib sqlite3 零新依赖（对齐 R3.6 手写 Prometheus 的先例），WAL 模式；
+- 单连接 + 线程锁，调用方经 asyncio.to_thread 进事件循环旁路（写入量 = 人工对话级，微秒级语句）；
+- 观测数据不进业务 PostgreSQL——保留期/清理策略独立，collector 保持可单独运行；
+- OBS_DB_PATH 未配置时用内存库（测试/裸跑仍可用，只是不跨重启）；compose 挂 named volume。
+
+失败隔离：所有写入错误由调用方吞掉（观测挂了不能影响 collector 主链路）。
+"""
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+import threading
+import time
+
+PERSONAL_DATA_TARGETS = (
+    {
+        "id": "observability_raw_content",
+        "storage_variants": ("turns", "spans", "llm_calls", "logs"),
+        "sql_variants": ("turns", "spans", "llm_calls", "logs"),
+    },
+)
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS turns(
+  trace_id TEXT PRIMARY KEY,
+  session_id TEXT DEFAULT '',
+  ts INTEGER DEFAULT 0,
+  duration_ms REAL DEFAULT 0,
+  user_text TEXT DEFAULT '',
+  speech TEXT DEFAULT '',
+  status TEXT DEFAULT '',
+  path TEXT DEFAULT '',
+  input_source TEXT DEFAULT '',
+  is_confirmation INTEGER DEFAULT 0,
+  ui_card_type TEXT DEFAULT '',
+  actions INTEGER DEFAULT 0,
+  error TEXT DEFAULT '',
+  badcase INTEGER DEFAULT 0,
+  note TEXT DEFAULT '',
+  intents TEXT DEFAULT '',       -- 实际落域（cloud.planning span 合并写入，逗号串）
+  plan_mode TEXT DEFAULT '',     -- 规划输出通道（toolcall|…|toolcall_degraded）
+  gold_intents TEXT DEFAULT '',  -- 人工标注的正确落域（数据飞轮资产；UPSERT 不碰、保留期豁免）
+  edge_nlu TEXT DEFAULT '',      -- 端云分歧（M5 P2-D2）：'<端侧初判>|<conf>' + '!=' 后缀表示与云侧落域不一致
+  actionability TEXT DEFAULT ''  -- 可执行性 shadow（B6 §2）：'<execute|clarify|reject>|<conf>' + '!=' 后缀表示与 planner 分歧
+);
+CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id, ts);
+CREATE INDEX IF NOT EXISTS idx_turns_ts ON turns(ts);
+CREATE INDEX IF NOT EXISTS idx_turns_status ON turns(status, ts);
+
+CREATE TABLE IF NOT EXISTS spans(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  trace_id TEXT DEFAULT '',
+  span_id TEXT DEFAULT '',
+  parent_id TEXT DEFAULT '',
+  ts INTEGER DEFAULT 0,
+  service TEXT DEFAULT '',
+  node TEXT DEFAULT '',
+  status TEXT DEFAULT '',
+  duration_ms REAL DEFAULT 0,
+  attrs TEXT DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_spans_trace ON spans(trace_id);
+CREATE INDEX IF NOT EXISTS idx_spans_ts ON spans(ts);
+
+CREATE TABLE IF NOT EXISTS llm_calls(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  trace_id TEXT DEFAULT '',
+  session_id TEXT DEFAULT '',
+  ts INTEGER DEFAULT 0,
+  caller TEXT DEFAULT '',
+  model TEXT DEFAULT '',
+  provider TEXT DEFAULT '',
+  fallback INTEGER DEFAULT 0,
+  prompt_tokens INTEGER DEFAULT 0,
+  completion_tokens INTEGER DEFAULT 0,
+  latency_ms REAL DEFAULT 0,
+  cache_hit INTEGER DEFAULT 0,
+  thinking INTEGER DEFAULT 0,
+  status TEXT DEFAULT '',
+  error TEXT DEFAULT '',
+  prompt_tail TEXT DEFAULT '',
+  content_head TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_llm_trace ON llm_calls(trace_id);
+CREATE INDEX IF NOT EXISTS idx_llm_ts ON llm_calls(ts);
+
+CREATE TABLE IF NOT EXISTS logs(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts INTEGER DEFAULT 0,
+  service TEXT DEFAULT '',
+  level TEXT DEFAULT '',
+  logger TEXT DEFAULT '',
+  msg TEXT DEFAULT '',
+  trace_id TEXT DEFAULT '',
+  session_id TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_logs_trace ON logs(trace_id);
+CREATE INDEX IF NOT EXISTS idx_logs_ts ON logs(ts);
+"""
+
+_TURN_FIELDS = ("session_id", "ts", "duration_ms", "user_text", "speech", "status",
+                "path", "input_source", "is_confirmation", "ui_card_type",
+                "actions", "error")
+
+
+def _rows_to_dicts(cursor) -> list[dict]:
+    cols = [c[0] for c in cursor.description]
+    return [dict(zip(cols, row)) for row in cursor.fetchall()]
+
+
+def _plan_summary_of(attrs: dict) -> tuple[str, str, str, str]:
+    """cloud.planning span attrs → (intents 逗号串, plan_mode, edge_nlu, actionability)。
+
+    edge_nlu 带 `!=` 后缀表示端云**分歧**（M5 P2-D2）——存成一列而不是靠事后逐轮拉 span
+    详情：分歧要能成为「把这一轮拉进日报」的信号，就必须在**扫描时**可见，逐轮补拉详情
+    是 N+1（P0 刚为此把全轮详情拉取砍掉，不能又加回来）。
+
+    优先显式 attrs['intents']（engine 紧凑发射，意图名是系统枚举值、不受内容门控/截断）；
+    旧版 engine 无该键时从 attrs['plan'] JSON 兜底解析——它经 gate_content 截 1200，
+    截断即解析失败则放弃（不产半截意图列表）。"""
+    if not isinstance(attrs, dict):
+        return "", "", "", ""
+    plan_mode = str(attrs.get("plan_mode") or "")
+    edge_nlu = str(attrs.get("edge_nlu") or "")
+    if edge_nlu and str(attrs.get("edge_agree", "")) == "0":
+        edge_nlu += "!="
+    # B6 §2 可执行性 shadow：与 edge_nlu 同款——`!=` 后缀表示形态判定与 planner 分歧。
+    # 分歧轮是这套 shadow 唯一有信息量的产物，必须在**扫描时**可见。
+    actionability = str(attrs.get("actionability") or "")
+    if actionability and str(attrs.get("actionability_agree", "")) == "0":
+        actionability += "!="
+    intents = str(attrs.get("intents") or "")
+    if not intents:
+        raw = attrs.get("plan")
+        if isinstance(raw, str) and raw:
+            try:
+                steps = json.loads(raw)
+                intents = ",".join(
+                    str(s.get("intent") or "") for s in steps if isinstance(s, dict))
+            except (ValueError, AttributeError, TypeError):
+                intents = ""
+    return intents[:400], plan_mode[:40], edge_nlu[:60], actionability[:40]
+
+
+def _merge_intents(*values: object) -> str:
+    merged: list[str] = []
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        for item in value.split(","):
+            name = item.strip()
+            if name and name not in merged:
+                merged.append(name)
+    return ",".join(merged)[:400]
+
+
+class ObsDB:
+    """turns/spans/llm_calls/logs 的同步 SQLite 存取（调用方负责 to_thread）。"""
+
+    def __init__(self, path: str | None = None):
+        self.path = path or os.getenv("OBS_DB_PATH", "") or ":memory:"
+        parent = os.path.dirname(self.path)
+        if parent and self.path != ":memory:":
+            os.makedirs(parent, exist_ok=True)
+        self._conn = sqlite3.connect(self.path, check_same_thread=False)
+        self._lock = threading.Lock()
+        with self._lock:
+            if self.path != ":memory:":
+                self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.executescript(_SCHEMA)
+            # 加法式迁移：已存在的 obs.db（named volume 跨重启）补新列，
+            # CREATE IF NOT EXISTS 不会给旧表加列
+            self._ensure_column("llm_calls", "provider", "TEXT DEFAULT ''")
+            # QA I-057（2026-08-19）：这一跳换没换厂商。provider 一直有，但
+            # 「是不是降级」要人拿它比 active 才看得出来——排查现场没人会去比。
+            self._ensure_column("llm_calls", "fallback", "INTEGER DEFAULT 0")
+            # 数据飞轮 P0（2026-07-28）：落域可观测 + 标注载体
+            self._ensure_column("turns", "intents", "TEXT DEFAULT ''")
+            self._ensure_column("turns", "plan_mode", "TEXT DEFAULT ''")
+            self._ensure_column("turns", "gold_intents", "TEXT DEFAULT ''")
+            self._ensure_column("turns", "edge_nlu", "TEXT DEFAULT ''")
+            # B6 §2（2026-08-11）：可执行性 shadow 判定，`!=` 后缀=与 planner 分歧
+            self._ensure_column("turns", "actionability", "TEXT DEFAULT ''")
+            self._conn.commit()
+
+    def _ensure_column(self, table: str, column: str, decl: str) -> None:
+        cols = {row[1] for row in self._conn.execute(f"PRAGMA table_info({table})")}
+        if column not in cols:
+            self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+    # ── 写入（ingest 路径） ──────────────────────────────────────────────
+
+    def insert_turn(self, event: dict) -> None:
+        trace_id = event.get("trace_id") or ""
+        if not trace_id:
+            return
+        values = {
+            "session_id": event.get("session_id", "") or "",
+            "ts": int(event.get("ts", 0) or 0),
+            "duration_ms": float(event.get("duration_ms", 0) or 0),
+            "user_text": event.get("user_text", "") or "",
+            "speech": event.get("speech", "") or "",
+            "status": event.get("status", "") or "",
+            "path": event.get("path", "") or "",
+            "input_source": event.get("input_source", "") or "",
+            "is_confirmation": 1 if event.get("is_confirmation") else 0,
+            "ui_card_type": event.get("ui_card_type", "") or "",
+            "actions": int(event.get("actions", 0) or 0),
+            "error": event.get("error", "") or "",
+        }
+        assigns = ", ".join(f"{k}=excluded.{k}" for k in _TURN_FIELDS)
+        with self._lock:
+            # UPSERT：重复到达覆盖运行字段，但绝不动人工标记（badcase/note）
+            self._conn.execute(
+                f"INSERT INTO turns(trace_id, {', '.join(_TURN_FIELDS)}) "
+                f"VALUES(:trace_id, {', '.join(':' + k for k in _TURN_FIELDS)}) "
+                f"ON CONFLICT(trace_id) DO UPDATE SET {assigns}",
+                {"trace_id": trace_id, **values})
+            incoming_intents = _merge_intents(event.get("intents", ""))
+            if incoming_intents:
+                row = self._conn.execute(
+                    "SELECT intents FROM turns WHERE trace_id=?", (trace_id,)
+                ).fetchone()
+                merged = _merge_intents(
+                    row[0] if row else "", incoming_intents)
+                self._conn.execute(
+                    "UPDATE turns SET intents=? WHERE trace_id=?",
+                    (merged, trace_id),
+                )
+            self._conn.commit()
+
+    def insert_span(self, event: dict) -> None:
+        trace_id = event.get("trace_id", "") or ""
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO spans(trace_id, span_id, parent_id, ts, service, node, "
+                "status, duration_ms, attrs) VALUES(?,?,?,?,?,?,?,?,?)",
+                (trace_id, event.get("span_id", "") or "",
+                 event.get("parent_id", "") or "", int(event.get("ts", 0) or 0),
+                 event.get("service", "") or "", event.get("node", "") or "",
+                 event.get("status", "") or "", float(event.get("duration_ms", 0) or 0),
+                 json.dumps(event.get("attrs") or {}, ensure_ascii=False)))
+            # 落域可观测（数据飞轮 P0）：turn 事件由端侧收口发射、天然不含云侧规划信息
+            # （端云信息断链），在存储层按 trace_id 汇合——cloud.planning span 到达时把
+            # intents/plan_mode 合并进 turns 行。顺序无关：span 先到→建骨架行（其余字段
+            # 等 turn UPSERT 补齐）；turn 先到→UPDATE 补两列。intents/plan_mode 不在
+            # _TURN_FIELDS，turn 重复到达不会抹掉。
+            if trace_id and (event.get("node") or "") == "cloud.planning":
+                intents, plan_mode, edge_nlu, actionability = _plan_summary_of(
+                    event.get("attrs") or {})
+                if intents or plan_mode or edge_nlu or actionability:
+                    row = self._conn.execute(
+                        "SELECT intents FROM turns WHERE trace_id=?", (trace_id,)
+                    ).fetchone()
+                    intents = _merge_intents(row[0] if row else "", intents)
+                    self._conn.execute(
+                        "INSERT INTO turns(trace_id, intents, plan_mode, edge_nlu, "
+                        "actionability) VALUES(?,?,?,?,?) "
+                        "ON CONFLICT(trace_id) DO UPDATE SET "
+                        "intents=excluded.intents, plan_mode=excluded.plan_mode, "
+                        "edge_nlu=excluded.edge_nlu, "
+                        "actionability=excluded.actionability",
+                        (trace_id, intents, plan_mode, edge_nlu, actionability))
+            self._conn.commit()
+
+    def insert_llm(self, event: dict) -> None:
+        with self._lock:
+            cursor = self._conn.execute(
+                "INSERT INTO llm_calls(trace_id, session_id, ts, caller, model, provider, "
+                "fallback, prompt_tokens, completion_tokens, latency_ms, cache_hit, thinking, "
+                "status, error, prompt_tail, content_head) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (event.get("trace_id", "") or "", event.get("session_id", "") or "",
+                 int(event.get("ts", 0) or 0), event.get("caller", "") or "",
+                 event.get("model", "") or "", event.get("provider", "") or "",
+                 1 if event.get("fallback") else 0,
+                 int(event.get("prompt_tokens", 0) or 0),
+                 int(event.get("completion_tokens", 0) or 0),
+                 float(event.get("latency_ms", 0) or 0),
+                 1 if event.get("cache_hit") else 0,
+                 1 if event.get("thinking") else 0,
+                 event.get("status", "") or "", event.get("error", "") or "",
+                 event.get("prompt_tail", "") or "", event.get("content_head", "") or ""))
+            # ``pinned``/``requested_tier`` arrived after the SQLite table was
+            # established. Persist them in the existing generic span contract
+            # instead of a DB schema migration; turn_detail deterministically
+            # joins the nth llm row with the nth metadata span.
+            attrs = json.dumps({
+                "llm_call_id": int(cursor.lastrowid),
+                "pinned": bool(event.get("pinned")),
+                "requested_tier": str(event.get("requested_tier") or "")[:100],
+                "provider": str(event.get("provider") or "")[:80],
+                "model": str(event.get("model") or "")[:120],
+            }, ensure_ascii=False)
+            self._conn.execute(
+                "INSERT INTO spans(trace_id, span_id, parent_id, ts, service, node, "
+                "status, duration_ms, attrs) VALUES(?,?,?,?,?,?,?,?,?)",
+                (event.get("trace_id", "") or "", f"llm-meta-{cursor.lastrowid}", "",
+                 int(event.get("ts", 0) or 0), "llm-gateway", "llm.call.meta",
+                 event.get("status", "") or "", 0.0, attrs),
+            )
+            self._conn.commit()
+
+    def insert_log(self, event: dict) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO logs(ts, service, level, logger, msg, trace_id, session_id) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (int(event.get("ts", 0) or 0), event.get("service", "") or "",
+                 event.get("level", "") or "", event.get("logger", "") or "",
+                 event.get("msg", "") or "", event.get("trace_id", "") or "",
+                 event.get("session_id", "") or ""))
+            self._conn.commit()
+
+    # ── 查询（REST API） ────────────────────────────────────────────────
+
+    def sessions(self, limit: int = 50, q: str = "") -> list[dict]:
+        """会话列表：起止时间/轮数/错误数/拒识数/badcase 数，按最近活跃倒序。
+        q 非空时保留命中的会话——按会话 id 前缀，或按轮次文本（原话/话术 LIKE）。"""
+        sql = ("SELECT session_id, MIN(ts) AS first_ts, MAX(ts) AS last_ts, "
+               "COUNT(*) AS turns, "
+               "SUM(CASE WHEN status IN ('err','timeout','empty') THEN 1 ELSE 0 END) AS errors, "
+               "SUM(CASE WHEN status='rejected' THEN 1 ELSE 0 END) AS rejected, "
+               "SUM(badcase) AS badcases FROM turns")
+        params: list = []
+        if q:
+            sql += (" WHERE session_id LIKE ? OR session_id IN "
+                    "(SELECT DISTINCT session_id FROM turns "
+                    "WHERE user_text LIKE ? OR speech LIKE ?)")
+            like = f"%{q}%"
+            params += [f"{q}%", like, like]
+        sql += " GROUP BY session_id ORDER BY last_ts DESC LIMIT ?"
+        params.append(int(limit))
+        with self._lock:
+            return _rows_to_dicts(self._conn.execute(sql, params))
+
+    def session_turns(self, session_id: str, limit: int = 200) -> list[dict]:
+        with self._lock:
+            return _rows_to_dicts(self._conn.execute(
+                "SELECT * FROM turns WHERE session_id=? ORDER BY ts ASC LIMIT ?",
+                (session_id, int(limit))))
+
+    def turn_detail(self, trace_id: str) -> dict | None:
+        """轮次详情 = turn + spans + llm_calls + logs（badcase 排查一屏所需的全部）。"""
+        with self._lock:
+            rows = _rows_to_dicts(self._conn.execute(
+                "SELECT * FROM turns WHERE trace_id=?", (trace_id,)))
+            turn = rows[0] if rows else None
+            spans = _rows_to_dicts(self._conn.execute(
+                "SELECT * FROM spans WHERE trace_id=? ORDER BY ts ASC, id ASC",
+                (trace_id,)))
+            llm_calls = _rows_to_dicts(self._conn.execute(
+                "SELECT * FROM llm_calls WHERE trace_id=? ORDER BY ts ASC, id ASC",
+                (trace_id,)))
+            logs = _rows_to_dicts(self._conn.execute(
+                "SELECT * FROM logs WHERE trace_id=? ORDER BY ts ASC, id ASC",
+                (trace_id,)))
+        if turn is None and not spans and not llm_calls and not logs:
+            return None
+        for s in spans:
+            try:
+                s["attrs"] = json.loads(s.get("attrs") or "{}")
+            except Exception:
+                s["attrs"] = {}
+        pin_meta = {
+            int((span.get("attrs") or {}).get("llm_call_id") or 0):
+                (span.get("attrs") or {})
+            for span in spans if span.get("node") == "llm.call.meta"
+        }
+        for call in llm_calls:
+            meta = pin_meta.get(int(call.get("id") or 0), {})
+            call["pinned"] = bool(meta.get("pinned"))
+            call["requested_tier"] = str(meta.get("requested_tier") or "")
+        return {"turn": turn, "spans": spans, "llm_calls": llm_calls, "logs": logs}
+
+    def search_turns(self, q: str = "", status: str = "", session_id: str = "",
+                     badcase: bool | None = None, since: int = 0, until: int = 0,
+                     limit: int = 50) -> list[dict]:
+        sql = "SELECT * FROM turns WHERE 1=1"
+        params: list = []
+        if q:
+            # trace_id 前缀直达：HMI 复制的短 id 粘进搜索框即可定位
+            sql += " AND (user_text LIKE ? OR speech LIKE ? OR trace_id LIKE ?)"
+            like = f"%{q}%"
+            params += [like, like, f"{q}%"]
+        if status:
+            sql += " AND status=?"
+            params.append(status)
+        if session_id:
+            sql += " AND session_id=?"
+            params.append(session_id)
+        if badcase is not None:
+            sql += " AND badcase=?"
+            params.append(1 if badcase else 0)
+        if since:
+            sql += " AND ts>=?"
+            params.append(int(since))
+        if until:
+            sql += " AND ts<=?"
+            params.append(int(until))
+        sql += " ORDER BY ts DESC LIMIT ?"
+        params.append(int(limit))
+        with self._lock:
+            return _rows_to_dicts(self._conn.execute(sql, params))
+
+    def set_badcase(self, trace_id: str, flag: bool, note: str = "") -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE turns SET badcase=?, note=? WHERE trace_id=?",
+                (1 if flag else 0, note or "", trace_id))
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def set_gold(self, trace_id: str, gold_intents: str) -> bool:
+        """正确落域人工标注（数据飞轮 P0 标注载体）。与 badcase/note 同级人工标记：
+        turn UPSERT 不碰、保留期豁免。空串=清除标注。"""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE turns SET gold_intents=? WHERE trace_id=?",
+                (gold_intents or "", trace_id))
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def export_labels(self, since: int = 0, until: int = 0,
+                      limit: int = 5000) -> list[dict]:
+        """批量导出标注集（utterance → gold 落域 → 实际落域）。数据飞轮的资产出口：
+        RoutingBench 用例生成 / P1 范例草案 / P3 训练语料都从这里取数。"""
+        sql = ("SELECT trace_id, session_id, ts, user_text, intents, plan_mode, "
+               "gold_intents, badcase, note FROM turns WHERE gold_intents != ''")
+        params: list = []
+        if since:
+            sql += " AND ts>=?"
+            params.append(int(since))
+        if until:
+            sql += " AND ts<=?"
+            params.append(int(until))
+        sql += " ORDER BY ts ASC LIMIT ?"
+        params.append(int(limit))
+        with self._lock:
+            return _rows_to_dicts(self._conn.execute(sql, params))
+
+    def observed_intents(self) -> list[str]:
+        """已观测意图清单（intents ∪ gold_intents 展开去重），标注输入的候选数据源。"""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT intents FROM turns WHERE intents != '' "
+                "UNION SELECT gold_intents FROM turns WHERE gold_intents != ''"
+            ).fetchall()
+        out: set[str] = set()
+        for (v,) in rows:
+            out.update(x.strip() for x in str(v).split(",") if x.strip())
+        return sorted(out)
+
+    def query_logs(self, trace_id: str = "", service: str = "", level: str = "",
+                   q: str = "", limit: int = 200) -> list[dict]:
+        sql = "SELECT * FROM logs WHERE 1=1"
+        params: list = []
+        if trace_id:
+            sql += " AND trace_id=?"
+            params.append(trace_id)
+        if service:
+            sql += " AND service=?"
+            params.append(service)
+        if level:
+            sql += " AND level=?"
+            params.append(level.upper())
+        if q:
+            sql += " AND msg LIKE ?"
+            params.append(f"%{q}%")
+        sql += " ORDER BY ts DESC, id DESC LIMIT ?"
+        params.append(int(limit))
+        with self._lock:
+            rows = _rows_to_dicts(self._conn.execute(sql, params))
+        rows.reverse()  # 返回按时间正序，便于阅读
+        return rows
+
+    def llm_summary(self, hours: float = 24.0) -> dict:
+        """LLM 消耗归属汇总：时间窗内按 caller×model 分组（tokens/次数/错误/时延）。
+
+        2026-07-13 消耗排查的收尾一环：caller 空 = 归属盲区（直连网关未带
+        caller_service 的调用方），显示为「(未归属)」供 dashboard 高亮盯防——
+        按约定（conventions §9.2）它应恒为零。"""
+        cutoff = int((time.time() - hours * 3600) * 1000)
+        with self._lock:
+            groups = _rows_to_dicts(self._conn.execute(
+                """
+                SELECT COALESCE(NULLIF(caller, ''), '(未归属)') AS caller, model,
+                       COUNT(*) AS calls,
+                       COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
+                       COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
+                       SUM(CASE WHEN status != 'ok' THEN 1 ELSE 0 END) AS errors,
+                       ROUND(AVG(latency_ms), 1) AS avg_latency_ms,
+                       MAX(ts) AS last_ts
+                FROM llm_calls WHERE ts >= ?
+                GROUP BY 1, 2
+                -- 排序必须重写聚合表达式：ORDER BY 里的裸列名会被 SQLite 解析成
+                -- 组内任意行的值而非 SUM（实测 2.7 万排到 43.8 万前面）
+                ORDER BY COALESCE(SUM(prompt_tokens), 0)
+                         + COALESCE(SUM(completion_tokens), 0) DESC,
+                         COUNT(*) DESC
+                """, (cutoff,)))
+        return {"hours": hours, "groups": groups}
+
+    # ── 保留期清理 ──────────────────────────────────────────────────────
+
+    def cleanup(self, retention_days: float | None = None) -> int:
+        """删过期数据。badcase 标记与 gold 标注的轮次（及其 spans/llm/logs）豁免——
+        排查素材与标注资产不过期（数据飞轮：标注是要长期复利的数据）。返回删除的 turn 行数。"""
+        if retention_days is None:
+            retention_days = float(os.getenv("OBS_RETENTION_DAYS", "7"))
+        cutoff = int((time.time() - retention_days * 86400) * 1000)
+        with self._lock:
+            keep = ("SELECT trace_id FROM turns WHERE badcase=1 OR gold_intents != ''")
+            cur = self._conn.execute(
+                f"DELETE FROM turns WHERE ts<? AND badcase=0 AND gold_intents=''",
+                (cutoff,))
+            deleted = cur.rowcount
+            for table in ("spans", "llm_calls", "logs"):
+                self._conn.execute(
+                    f"DELETE FROM {table} WHERE ts<? AND trace_id NOT IN ({keep})",
+                    (cutoff,))
+            self._conn.commit()
+        return deleted
+
+    def close(self) -> None:
+        with self._lock:
+            self._conn.close()

@@ -1,0 +1,59 @@
+agent_id: road-safety
+version: 0.1.0
+display_name: 安全助手
+category: core
+trust_level: first_party
+deployment: cloud
+latency_budget_ms: 3000
+fallback: chitchat
+
+capabilities:
+  - intent: safety.driving_advice
+    description: 综合天气+路况给出驾驶安全建议
+    slots: [destination]
+    # 2026-08-03：「路上怎么样」从这里移走。它一句也不体现**驾驶建议**这个角度，
+    # 字面就是隔壁 `safety.road_condition`「查询路况」——两条 examples 只差一个字
+    # （路上/路况）却指向不同 intent，**差的不是判据是一个词**，模型分不开、人也分不开。
+    # 与下面那段注释是同一个病的第二例：examples 要写「只有本能力答得了」的说法。
+    # 证据：对抗测试消融给出 `causal=supported`（`no-exemplars` 臂稳定翻正），
+    # 镜像到 `skills/exemplars/safety.yaml` 的这条以 `@lex:1.00` 精确命中把
+    # 「路上怎么样」拉到 driving_advice，而语料 gold 要 road_condition。
+    examples: ["这会儿开车出门合适吗", "开车去上海安全吗", "今天适合开车吗"]
+  # 2026-08-15（卡 Q9 / QA 轮 I-043）：**驾驶员状态**此前在能力面上完全不存在。
+  # 后果不是「答得不好」，是**根本路由不过来**——「困到睁不开眼了，还要开两个小时」
+  # 三次取样分别落到了闲聊、拒识和音量调节，而 Agent 里的确定性疲劳判据一次都没跑到。
+  # 判据（本仓既有）：**改实现不等于加能力——planner 只看得见 manifest。**
+  # examples 按「只有本能力答得了」写：这几句除了安全助手没有第二个域该接。
+  - intent: safety.driver_state
+    description: 驾驶员自身状态影响能否继续驾驶时的安全判断与处置建议
+      （疲劳/困倦/饮酒或服药/身体不适）。**不是**天气路况建议，也不是闲聊安慰
+    slots: []
+    examples: ["困到睁不开眼了还要开两个小时", "刚喝了两杯酒还能开车吗",
+               "有点犯困撑一下应该没事吧", "开着开着有点头晕"]
+  # 2026-07-30 examples 判别化：原例句「有天气预警吗」「暴雨预警了吗」与 info.alerts 的
+  # 「有没有天气预警」「北京有暴雨预警吗」**只差语气词**——描述是判别的（本条是「对驾驶的
+  # 影响」），但例句一句也不体现驾驶角度，于是两个域在同一批说法上互相声称。这是与
+  # nearby/navigation/charging 同一个病：**manifest examples 是「我这能力能答这句」写出来的，
+  # 天然不判别化**；P1 把它们批量导入范例库当金标，冲突就被激活成了判定尺的自相矛盾。
+  # 裁定：裸问预警本身归 info.alerts；带驾驶影响/上路注意归本条。
+  - intent: safety.weather_alert
+    description: 查询天气预警**对驾驶的影响**（能不能上路、路上要注意什么）；
+      只问预警本身有没有、几级归 info.alerts
+    slots: [city]
+    examples: ["这天气预警影响开车吗", "有预警的话路上要注意什么"]
+  - intent: safety.road_condition
+    description: 查询路况（拥堵/事故/施工）
+    slots: [route]
+    examples: ["路况怎么样", "高速堵车吗"]
+
+# SF3：继续驾驶/降速/靠边是安全问题，不是导航或音量控制。只声明本 Agent 自己的
+# 窄语法，仍经通用 RouteHintEngine；设备/媒体词命中 guard 时完全不接管。
+route_hints:
+  - pattern: '^\s*(?:(?:(?:现在|目前)(?:在)?)?(?:高速|路上|行驶|驾驶)[^，。！？!?]{0,12}(?:(?:还能|能否|能不能|可以)?\s*(?:继续开|继续行驶|开车|驾驶))|(?:慢一点|慢点)\s*(?:开|行驶)|(?:这种情况|这种状态|这样|现在)?\s*(?:需要|要不要|是否需要)\s*(?:靠边(?:停车)?|停车))(?:可以)?[吗呢吧]?[。！？!?]?\s*$'
+    intent: safety.driving_advice
+    policy: replace
+    priority: 126
+    guard: '(?:视频|音乐|歌曲|游戏|软件|程序|空调|设备|手机|电脑)'
+
+requires_permissions: [location.read, network.external]
+context_scopes: [location]   # 透传给子 agent（navigation）

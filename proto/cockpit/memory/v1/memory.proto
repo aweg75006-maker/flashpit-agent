@@ -1,0 +1,369 @@
+syntax = "proto3";
+
+package cockpit.memory.v1;
+
+// 上下文的唯一真相源：短期会话、车辆上下文、长期画像。
+service Memory {
+  rpc GetContext (GetContextRequest) returns (GetContextResponse); // 按 scopes 取上下文
+  rpc AppendTurn (AppendTurnRequest) returns (AppendTurnResponse); // 写入一轮对话
+  rpc GetSession (GetSessionRequest) returns (GetSessionResponse); // 取最近 N 轮
+  rpc UpsertProfile (UpsertProfileRequest) returns (UpsertProfileResponse); // 写用户画像（如常用地点 places）
+
+  // 分层记忆重构（2026-06-25，向后兼容追加）：语义画像 + 情景记忆。
+  rpc Remember (RememberRequest) returns (RememberResponse);   // 写语义/情景记忆（抽取管线或 Agent 显式）
+  rpc Recall (RecallRequest) returns (RecallResponse);         // 语义召回（向量 + scope/occupant + 时序融合）
+  rpc ForgetUser (ForgetUserRequest) returns (ForgetUserResponse); // 合规：删除用户全量记忆
+  // M-B L1：按 OwnerKey + item id **精确**删一条。存在的理由是 HMI 记忆面板此前用
+  // `ForgetUser(scopes=[scope])` 实现「删这一行」——那会删掉该 scope 下所有乘员的条目
+  // （删一个人的名字＝删光全车的名字）。精确删除必须有自己的入口，不能复用 scope 删。
+  rpc DeleteMemoryItem (DeleteMemoryItemRequest) returns (DeleteMemoryItemResponse);
+  rpc ExportUser (ExportUserRequest) returns (ExportUserResponse); // 合规：导出用户全量记忆
+  // M2 记忆图谱 P1：关系边一跳查询。**刻意不做通用图遍历 RPC**——v1 只有两种消费形态
+  // （按实体查边 / 人称→地点一跳），开放多跳会长出没人验证的推理路径。
+  rpc QueryRelations (QueryRelationsRequest) returns (QueryRelationsResponse);
+  rpc ResolvePersonPlace (ResolvePersonPlaceRequest) returns (ResolvePersonPlaceResponse);
+
+  // M4 P4 声纹多用户：模板的**存储与比对**归记忆域（生物特征数据；GDPR 级联删是红线），
+  // 「音频→向量」归 llm-gateway（模型面，架构承诺=模型调用唯一出口）。
+  // **红线：occupant_id 只进记忆域，绝不作鉴权因子**（源码级断言测试钉死）。
+  rpc EnrollVoiceprint (EnrollVoiceprintRequest) returns (EnrollVoiceprintResponse);
+  rpc IdentifySpeaker (IdentifySpeakerRequest) returns (IdentifySpeakerResponse);
+  rpc ListVoiceprints (ListVoiceprintsRequest) returns (ListVoiceprintsResponse);
+  rpc DeleteVoiceprint (DeleteVoiceprintRequest) returns (DeleteVoiceprintResponse);
+  // 改名单独成 RPC（2026-07-26 真机反馈）：名字是随时会改的元数据，把它和「重录三段声纹」
+  // 绑在一起，用户为了改个称呼就得重走注册流程——真机上正是这一步把已存的名字丢了。
+  rpc RenameVoiceprint (RenameVoiceprintRequest) returns (RenameVoiceprintResponse);
+}
+
+message GetContextRequest {
+  string session_id = 1;
+  string user_id = 2;
+  string vehicle_id = 3;
+  repeated string scopes = 4;       // e.g. "vehicle.location","profile.taste"
+  string occupant_id = 5;           // M-B：profile.* 按 OwnerKey 取；空=primary
+}
+message GetContextResponse {
+  map<string, string> values = 1;   // scope -> JSON 字符串
+}
+
+message AppendTurnRequest {
+  string session_id = 1;
+  string role = 2;                  // user | assistant
+  string text = 3;
+  // 评审后补：供异步抽取管线知道把记忆写给谁（向后兼容，旧调用方不传=不触发抽取）
+  string user_id = 4;
+  string vehicle_id = 5;
+  string occupant_id = 6;
+  // 专用于 runner-signed synthetic extraction。Memory 必须验 HMAC，并将
+  // claims 的 run/user/session 与本请求逐项绑定；普通调用留空。
+  string e2e_memory_capability = 7;
+  // M-B：Turn 归属与 exchange 完整性。`turn_id` 是幂等键（同 id 同 payload=幂等成功，
+  // 同 id 异 payload=turn_conflict）；`exchange_id` 把一轮 user 请求与其可见 assistant
+  // 回复绑成一个不可拆的账目单元。**规格偏差记账**：设计文档 §11.1 把它们排在 7/8，
+  // 但 7 已被 M-A 的 `e2e_memory_capability` 占用，按「只追加不重用字段号」顺延到 8/9。
+  string turn_id = 8;
+  string exchange_id = 9;
+  // Q6 执行事实（2026-08-16）：本轮真实执行了哪些动作（`window.open` 这类命令名）。
+  // 存在的理由是「刚才实际执行了什么」此前**没有可查询的事实源**——`task_ledger`
+  // 只收 research/mcp_order，车控/导航/提醒/场景一条都不进，于是只能让 LLM 从对话
+  // 历史重构（真栈三次取样三个样，其中一次直接否认执行过）。
+  //
+  // **为什么挂在轮次上**：`local` 快路径那 313 个动作根本不上云，而端侧早就在调
+  // AppendTurn；挂这里是唯一同时覆盖 local/cloud/mixed 三条路径的位置。
+  // 向后兼容：不传=空，旧调用方一个字不用改。
+  repeated string actions = 10;
+  // C4-A 数据源维（2026-08-28，QA 修复批第 2 批）：这一轮**用了谁的数据、降没降级**。
+  // 与 `actions` 同一个载体、同一条判据：「这一轮做了什么」和「这一轮的数据从哪来」
+  // 都是**系统持有的事实**，而系统持有的事实绝不能让 LLM 答。缺它的代价 2026-08-26
+  // QA 一次性兑现了四笔（T41 编造「东方财富 19:23」、T43 编造自我纠错、T44 反问代码、
+  // T55 落进手册 mock）——`_prov` 此前**只活在卡上**，全仓 orchestrator/memory 无一处读它。
+  //
+  // **为什么是新字段而不是往 `actions` 里塞 `"_prov:vendor=…"`**：魔法字符串会让
+  // 「动作名」这个值域变得不闭合，而 `_executed_action_names` 的三处同口径消费方
+  // （端侧/obs/探针）都会跟着脏。加一维就加一维。
+  repeated TurnSource sources = 11;
+}
+// 一次外部数据使用事实。字段与 `ui_card._prov`（契约 §9.3）逐字同名——**账本记的
+// 就是用户看到的那张卡上盖的那个章**，两边不许各自演化出一套叫法。
+message TurnSource {
+  string card = 1;        // 卡型（`stock_quote`/`weather_now`…）：用户看到的是哪张卡
+  string vendor = 2;      // provider 决议出的厂商（`tushare`/`qweather`/`mock`…）
+  string mode = 3;        // real | mock | degraded | cached | deterministic
+  string fetched_at = 4;  // 数据获取时刻（ISO8601）——不是渲染时刻
+  string note = 5;        // 降级原因等，产生方给什么记什么
+  // 数据**自身**的时刻及其称呼（不是取数时刻）。称呼由产生方声明——账本的读出口
+  // 住在编排层，而编排层不认识「行情时间」这种领域说法（同 `_candidate_label`）。
+  string data_time = 6;
+  string data_time_label = 7;
+}
+message AppendTurnResponse {
+  bool ok = 1;
+  string error = 2;   // "missing_owner" / "turn_conflict"；ok=true 时为空
+}
+
+// 历史读取范围。**默认（UNSPECIFIED）按 OWNER_ONLY**——共享绝不能是缺省行为，
+// 想跨乘员必须显式声明，且只供 HMI 管理视图与合规导出使用。
+enum HistoryScope {
+  HISTORY_SCOPE_UNSPECIFIED = 0;
+  HISTORY_SCOPE_OWNER_ONLY = 1;
+  HISTORY_SCOPE_ALL_OCCUPANTS = 2;
+}
+
+message GetSessionRequest {
+  string session_id = 1;
+  uint32 last_n = 2;          // owner 过滤**之后**的最大 Turn 数
+  string user_id = 3;
+  string occupant_id = 4;     // 空=primary（不表示共享）
+  HistoryScope scope = 5;
+}
+message Turn {
+  string role = 1;
+  string text = 2;
+  int64 ts = 3;
+  // M-B：owner 与 exchange 落到数据面。旧 Turn 没有这些字段，读取时统一补 primary
+  // 与稳定 legacy id——**不按文本、时间或声纹猜真实 owner**。
+  string user_id = 4;
+  string vehicle_id = 5;      // 只描述 Turn 的车辆环境，不参与 OwnerKey
+  string occupant_id = 6;
+  string turn_id = 7;
+  string exchange_id = 8;
+  // Q6 执行事实（2026-08-16）：这一轮真实执行了哪些动作。
+  // 读侧必须也带上——**存下来而读不到等于没存**（同 M-B 那条「识别得出而数据面
+  // 存不下来等于没识别」的读写对称形态）。审计问答的确定性 handler 消费的就是它。
+  repeated string actions = 9;
+  // C4-A：数据源维的读侧。**存下来而读不到等于没存**——同 `actions` 那条读写
+  // 对称，且它已经被验证过一次：Q6 写侧上线时云侧 `clients.get_session` 漏了
+  // 一行，端侧 40% 的车控动作云端整整看不见（Q7-EL1 才补上）。
+  repeated TurnSource sources = 10;
+}
+message GetSessionResponse { repeated Turn turns = 1; }
+
+message UpsertProfileRequest {
+  string user_id = 1;
+  string key = 2;          // 画像字段名，如 "places"
+  string value_json = 3;   // 该字段的值；places 按 key 解释为 **patch**（见 occupant_id 注）
+  // M-B：places 的唯一真相源是 owner-scoped `memory_item place.*`。带 occupant 后
+  // `key="places"` 只对**出现的 key** 做 supersede-or-insert，未出现的 key 保持不变
+  // ——整块 user 级 map 覆盖正是「乘员 B 设了家把主驾的家冲掉」的成因。
+  string occupant_id = 4;  // 空=primary
+}
+message UpsertProfileResponse { bool ok = 1; }
+
+// ── 分层记忆（语义画像 / 情景记忆）──────────────────────────────
+// 一条可独立失效的记忆。语义=偏好/事实（带 predicate），情景=事件（summary 进 text）。
+message MemoryItem {
+  string id = 1;            // uuid；写入留空由服务端生成
+  string kind = 2;         // "semantic" | "episodic" | "procedural"
+  string user_id = 3;
+  string occupant_id = 4;  // 多用户维度，默认 "primary"
+  string predicate = 5;    // 语义谓词/键，如 "taste.spicy" "place.home"；情景留空
+  string text = 6;         // 自然语言陈述/事件摘要（向量化源）
+  string value_json = 7;   // 结构化值（可空）
+  string provenance = 8;   // "user_stated" | "agent_inferred"
+  float confidence = 9;
+  string scope = 10;       // 隐私/权限 scope，如 "profile.taste"
+  int64 valid_from = 11;   // epoch 秒
+  string superseded_by = 12; // 被哪条记忆取代（时序-lite，空=现行）
+  int64 source_ts = 13;
+  string source_session = 14;
+  // 评审后补：量产治理字段（多数 P0 仅存储，level/vehicle 感知召回留后期）
+  string tenant_id = 15;       // 多车企/多环境隔离（空=default）
+  string vehicle_id = 16;      // 车级偏好用；用户级留空
+  string memory_level = 17;    // user | vehicle | occupant | session
+  string embedding_model = 18; // 向量来源模型（换模型重算依据）
+  string privacy_level = 19;   // normal | sensitive | highly_sensitive
+  int64 valid_to = 20;         // 0=至今
+  int64 expires_at = 21;       // 0=不过期；临时偏好设此
+  string review_status = 22;   // auto_extracted | user_confirmed | rejected | corrected
+  string source_turn_ids = 23; // 抽取证据轮次（逗号分隔）
+  // M2 记忆图谱 P0：偏好强度。weight=0 表示未参与加权（M2 前的存量条目 / 非 semantic），
+  // 消费方一律回退 confidence——存量行为逐字不变（memory/weighting.effective_confidence）。
+  float weight = 24;           // 0-1，巩固期算出：base(provenance) + 重复证据加成，再乘时间衰减
+  int32 evidence_count = 25;   // 支撑该偏好的独立证据轮次数（「说过一次」vs「每周三次」的区分依据）
+  float half_life_days = 26;   // 0=不衰减（显式偏好）；推断类默认 90 天
+  string consent = 27;         // ''=未特别声明（沿用 privacy_level）；'explicit'=用户显式授权的敏感画像
+  // EVA 二轮 G6（2026-08-14）：「关于谁」维度。此前「我爸不喜欢空调冷」只能以自然语言
+  // 存在 occupant=说话人名下，「爸爸」这个指向活在字符串里、确定性代码读不出。
+  // subject=这条记忆关于谁：空=用户本人；家人用 canonical 亲属称谓（经 relation
+  // 同义词表归一：爸爸/妈妈/老婆/老公/女儿/儿子/孩子）；occupant_id 仍是**说话人**维度，两者正交。
+  string subject = 28;
+  // 偏好极性：like | dislike | ''（非偏好/未知）。负反馈（「这家太酸了」）靠它被
+  // 消费方降权——weight 通道只增不减是刻意的（强度≠方向），方向单独立字段。
+  string polarity = 29;
+}
+
+message RememberRequest { repeated MemoryItem items = 1; }
+message RememberResponse { repeated string ids = 1; bool ok = 2; }
+
+message RecallRequest {
+  string user_id = 1;
+  string occupant_id = 2;          // 空=默认 "primary"
+  string query = 3;                // 自然语言查询，向量召回
+  repeated string scopes = 4;      // 限定 scope（权限/隐私），空=不限
+  repeated string kinds = 5;       // 限定 semantic/episodic/...，空=不限
+  uint32 top_k = 6;                // 0=默认 5
+  bool include_superseded = 7;     // 默认 false：只取现行
+  // 评审后补：精确优先 + 阈值（避免低相关记忆污染 planner）
+  string predicate_prefix = 8;     // 精确画像读取：按谓词前缀过滤（如 "place." "taste."）
+  float min_score = 9;             // 相关性下限（0=不限）
+  float min_confidence = 10;       // 置信度下限（0=不限）
+  uint32 max_age_days = 11;        // 最大年龄天数（0=不限）
+  string subject = 12;             // G6：只取关于某人的记忆（如 "老婆"）；空=不过滤
+}
+message RecallResponse {
+  repeated MemoryItem items = 1;
+  repeated float scores = 2;       // 与 items 一一对应的相似度
+}
+
+message ForgetUserRequest {
+  string user_id = 1;
+  string occupant_id = 2;          // 空=该 user 全部乘员
+  repeated string scopes = 3;      // 空=全部 scope
+}
+message ForgetUserResponse { bool ok = 1; uint32 deleted = 2; }
+
+// M-B L1：精确删除。occupant_id **必填**（primary 也要显式传）——owner 级动作绝不
+// 从空值推断范围，否则「漏传 occupant」会静默升级成「删全部乘员」。
+message DeleteMemoryItemRequest {
+  string user_id = 1;
+  string occupant_id = 2;
+  string item_id = 3;
+}
+message DeleteMemoryItemResponse {
+  bool ok = 1;
+  // "missing_owner" | "not_found"（含跨 owner——不泄露该 item 属于谁）
+  // | "managed_memory"（identity.name 是声纹的受管投影，只能去声纹设置改名/删乘员）
+  string error = 2;
+  uint32 deleted = 3;
+  uint32 deleted_relations = 4;   // 同事务清掉的、以该 item 为端点的派生关系边
+}
+
+message ExportUserRequest { string user_id = 1; }
+message ExportUserResponse { string json = 1; } // 全量记忆 + 画像的 JSON
+
+// ── M2 记忆图谱 P1：关系边 ──────────────────────────────────────────────
+message RelationEdge {
+  string subject = 1;        // 实体名（"小雨"）
+  string rel = 2;            // 封闭词表：family|place_of|works_at|lives_at|owns|prefers_brand
+  string object = 3;         // 实体名或字面值（"女儿" / "XX小学"）
+  string object_ref = 4;     // 可选：memory_item.id 或 profile.places 键
+  float confidence = 5;
+  string provenance = 6;
+  string source_turn_ids = 7;
+}
+
+message QueryRelationsRequest {
+  string user_id = 1;
+  string occupant_id = 2;    // 空=primary
+  string subject = 3;        // 任意组合精确查（空=不限）；不做模糊匹配
+  string rel = 4;
+  string object = 5;
+  int32 limit = 6;
+}
+message QueryRelationsResponse { repeated RelationEdge edges = 1; }
+
+// 「去接孩子放学」：人称词 → family 边定人 → place_of 边定地点。
+// 查不到 / 有歧义一律 found=false —— 导航到错地方比查不到更糟，调用方须诚实追问。
+message ResolvePersonPlaceRequest {
+  string user_id = 1;
+  string occupant_id = 2;
+  string person_word = 3;    // 话术里的人称词（"孩子"/"女儿"/"老婆"）
+}
+message ResolvePersonPlaceResponse {
+  bool found = 1;
+  string person = 2;         // 解析到的实体名（"小雨"）
+  string place = 3;          // 地点（"XX小学"）
+  string object_ref = 4;
+}
+
+// ── M4 P4：声纹模板（生物特征，契约见 docs/conventions.md §9.11）─────────────
+// 只传向量不传音频：原始音频在网关提完 embedding 即弃，永不跨服务、永不落库。
+message VoiceVector { repeated float values = 1; }
+
+message EnrollVoiceprintRequest {
+  string user_id = 1;
+  // 空=服务端分配。**首个注册者分配到 "primary"**——存量记忆全在该 occupant 名下，
+  // 若首个注册者拿到 occ-1，他自己过去说过的一切当场失联（RFC §3.4，本设计最大的回归点）。
+  string occupant_id = 2;
+  // **空=保留该乘员已有的名字**，不是「置空」（2026-07-26 真机反馈）：重录声纹时前端
+  // 若没重填称呼就发空串，无条件覆盖会把之前存对的名字冲掉——而调用方本来就没打算改名。
+  string display_name = 3;
+  repeated VoiceVector samples = 4;  // 每段录音一条，已 L2 归一；服务端取均值再归一为模板
+  string model = 5;                  // 提取模型标识；与识别期不一致的模板视为 stale，提示重录
+  string tenant_id = 6;
+}
+message EnrollVoiceprintResponse {
+  bool ok = 1;
+  string occupant_id = 2;
+  string display_name = 3;
+  uint32 sample_count = 4;
+  float self_consistency = 5;   // 各段两两余弦均值；过低=录音里混了别人/噪声 → 拒绝建模板
+  string error = 6;             // ok=false 时非空，如 "low_consistency" / "dim_mismatch"
+}
+
+message IdentifySpeakerRequest {
+  string user_id = 1;
+  VoiceVector probe = 2;
+  string model = 3;             // 与模板 model 不一致的模板一律跳过（跨模型比余弦没有意义）
+  string tenant_id = 4;
+}
+message IdentifySpeakerResponse {
+  // 判定结果。**认不出一律回 "primary"**（诚实降级）——不是 guest/unknown：primary 是存量
+  // 语义，降到它=逐字回落今天；造一个新身份等于让用户体感「车失忆了」（RFC §3.3）。
+  string occupant_id = 1;
+  string display_name = 2;
+  string decision = 3;          // accept | below_threshold | ambiguous | no_templates | stale_model
+  float score = 4;              // top1 余弦
+  float runner_up = 5;          // top2 余弦（ambiguous 判据：top1-top2 < margin 即分不开）
+}
+
+message ListVoiceprintsRequest {
+  string user_id = 1;
+  string tenant_id = 2;
+  string model = 3;             // 非空则据此标记 stale；空=不计算
+}
+message VoiceprintInfo {
+  string occupant_id = 1;
+  string display_name = 2;
+  uint32 sample_count = 3;
+  float self_consistency = 4;
+  int64 updated_at = 5;
+  string model = 6;
+  bool stale = 7;
+  // M-B：存量重名组保持 `display_name_norm=NULL` 且原名不自动改写，这里如实标出来
+  // ——**不自动加数字/座位后缀选赢家**，由用户自己挑一个能区分的称呼。
+  bool name_conflict = 8;
+}
+message ListVoiceprintsResponse {
+  repeated VoiceprintInfo occupants = 1;
+  // 判定阈值随清单一起回：判定在 memory 侧（模板在这儿），但 /api/voiceprint/info 要能如实报出来。
+  float threshold = 2;
+  float margin = 3;
+}
+
+message DeleteVoiceprintRequest {
+  string user_id = 1;
+  string occupant_id = 2;
+  // true=同时删该乘员的 memory_item 与 memory_relation。用户说「删掉小雨」时的预期是
+  // 「忘掉这个人」，不是「留着记忆但认不出他」（RFC §3.4）。
+  bool purge_memory = 3;
+  string tenant_id = 4;
+}
+message DeleteVoiceprintResponse {
+  bool ok = 1;
+  // 0 = 库里本来就没有这条（如已在别处删过）。**调用方据此如实回话，别一律报「已删除」**。
+  uint32 deleted_templates = 2;
+  uint32 deleted_memories = 3;
+}
+
+message RenameVoiceprintRequest {
+  string user_id = 1;
+  string occupant_id = 2;
+  string display_name = 3;      // 必填且非空——空名不是「改名」，是调用方漏传
+  string tenant_id = 4;
+}
+message RenameVoiceprintResponse {
+  bool ok = 1;
+  string display_name = 2;
+  string error = 3;             // "not_found" / "empty_name"
+}

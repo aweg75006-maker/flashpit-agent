@@ -1,0 +1,369 @@
+# 范例库 · nearby 域（M5 P1 数据飞轮）
+# 契约 skills/exemplars/README.md；只追加不插入（eid=<domain>#序号，插队会让历史日报的 eid 指错条目）。
+domain: nearby
+exemplars:
+- text: 人均一百以内的川菜
+  plan:
+  - agent: nearby
+    intent: nearby.search
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 人均多少
+  plan:
+  - agent: nearby
+    intent: nearby.detail
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 几点关门
+  plan:
+  - agent: nearby
+    intent: nearby.detail
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 在这家点单
+  plan:
+  - agent: nearby
+    intent: nearby.order
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 它家电话多少
+  plan:
+  - agent: nearby
+    intent: nearby.detail
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 帮我订一家川菜馆
+  plan:
+  - agent: nearby
+    intent: nearby.order
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 帮我订位
+  plan:
+  - agent: nearby
+    intent: nearby.order
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 找个停车场
+  plan:
+  - agent: nearby
+    intent: nearby.search
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 找家川菜馆
+  plan:
+  - agent: nearby
+    intent: nearby.search
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 看第一个的详情
+  plan:
+  - agent: nearby
+    intent: nearby.detail
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 订个餐厅
+  plan:
+  - agent: nearby
+    intent: nearby.order
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 订今晚7点两位
+  plan:
+  - agent: nearby
+    intent: nearby.order
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 这家怎么样
+  plan:
+  - agent: nearby
+    intent: nearby.detail
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 附近有什么好吃的
+  plan:
+  - agent: nearby
+    intent: nearby.search
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 附近的景点
+  plan:
+  - agent: nearby
+    intent: nearby.search
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 附近的电影院
+  plan:
+  - agent: nearby
+    intent: nearby.search
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 附近的酒店
+  plan:
+  - agent: nearby
+    intent: nearby.search
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 附近的餐厅
+  plan:
+  - agent: nearby
+    intent: nearby.search
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 附近评分高的火锅
+  plan:
+  - agent: nearby
+    intent: nearby.search
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+- text: 麦当劳在哪
+  plan:
+  - agent: nearby
+    intent: nearby.search
+  source: manifest
+  added: '2026-07-29'
+  tags:
+  - canonical
+# 2026-07-30 地盘收口：这条原在 navigation.yaml（source=manifest 带过来的过期声明），
+# 双臂裸跑两档一致落 nearby——餐饮发现是本域地盘，navigation 的声明才是错标。
+- text: 找个评分高的川菜馆
+  plan:
+  - agent: nearby
+    intent: nearby.search
+  source: manifest
+  added: '2026-07-30'
+  tags:
+  - canonical
+  note: 原标 navigation.search_poi，2026-07-30 改判
+- text: 找一家附近评分最高的川菜馆，直接导航过去
+  plan:
+  - agent: nearby
+    intent: nearby.search
+    slots:
+      category: 餐饮
+      cuisine: 川菜
+      sort: rating
+  - agent: navigation
+    intent: navigation.navigate_to
+  source: trace
+  added: '2026-07-30'
+  tags:
+  - badcase
+  note: M-A A2-1 曾只落附近搜索；导航步骤从前序 items 取目的地
+# 2026-08-02 badcase 三连（demo-e0n7go：f53d2e58/c0d1a8d2/4799fb1f）：「天气适合去哪玩」
+# 只报天气、雨天推户外公园。组合判据归 guides/weather-outing；这里钉自含天气词的形态
+# （话里自带「下雨天」→ 单步室内推荐 + weather_context 承接）。
+- text: 下雨天去哪儿玩好
+  plan:
+  - agent: nearby
+    intent: nearby.search
+    slots:
+      category: 室内
+      weather_context: 雨
+  source: trace
+  added: '2026-08-02'
+  tags:
+  - badcase
+  note: badcase c0d1a8d2 族——雨天「去哪玩」要条件化推荐不要报天气
+- text: 你确定下雨天还推荐我去公园吗
+  plan:
+  - agent: nearby
+    intent: nearby.search
+    slots:
+      category: 室内
+      weather_context: 雨
+  source: trace
+  added: '2026-08-02'
+  tags:
+  - badcase
+  note: badcase 4799fb1f——质疑轮是纠错，改推室内，不许原样再推户外
+# 2026-08-02 泓舟裁定「找=发现 / 导航=出行」的载体（台账 nearby-navigation.find-vs-go）。
+# 说法刻意避开对抗语料原句「我要加油」——把语料原句写成范例，那条 unseen 用例就变成
+# seen，之后再读「通过率涨了」就读不出泛化（findings §4.3-2）。
+- text: 油不多了，附近哪儿有加油站
+  plan:
+  - agent: nearby
+    intent: nearby.search
+    slots:
+      keyword: 加油站
+  source: manual
+  added: '2026-08-02'
+  tags:
+  - badcase
+  note: 加油是需求不是动作——既不是开油箱盖，也不是直接发起导航
+- text: 这边有地铁站吗
+  plan:
+  - agent: nearby
+    intent: nearby.search
+    slots:
+      keyword: 地铁站
+  source: manual
+  added: '2026-08-02'
+  tags:
+  - badcase
+  note: 找/搜/有没有 归发现；导航去/带我去 才归 navigation
+# ── 2026-08-04 补：充电的**对象不是车**时归周边发现 ────────────────────────
+# 立卡来源 os.charge-place.phone（对抗语料 stable，A2 主体翻转）：「给手机找个能充电的
+# 店」5 趟里 3 趟**产出空计划**——模型看得出这不是给车充电，但没有任何知识告诉它接下来
+# 该干什么，于是什么都不做。对照组「给车找个充电的地方」5/5 落 charging.find。
+# 判据：**charging 域的主体恒为车**；充电对象是手机/电脑/随身设备时，用户要的是一个
+# 「能坐下充电的地方」，那是周边发现。
+- text: 找个能给手机充电的咖啡馆
+  plan:
+  - agent: nearby
+    intent: nearby.search
+    slots:
+      keyword: 咖啡馆
+  source: manual
+  added: '2026-08-04'
+  tags:
+  - badcase
+  note: 主体是手机不是车 → 不归 charging.find；charging 域的主体恒为车
+# ── 2026-08-04 补：并列句里被取消的那半句**不产生任何 step** ────────────────
+# 立卡来源 nq.dinner-music.drop-music（对抗语料 stable，A3 取消其一）：
+# 「找家川菜馆，音乐就不用放了」5 趟里 2 趟产出 `nearby.search` + **`media.pause`**。
+# `negation-and-deferral` policy 已经写着「不得规划 X 的反面」且**当轮确实注入了**
+# （名单里 `full:negation-and-deferral`，没被裁）——所以这不是「知识没进上下文」，
+# 是**进了没用对**：policy 的例子全是车控 open/close 对，媒体的「反面」长得不像反面
+# （`pause` 读起来像「顺手收拾一下」而不是「做了被禁的那件事」）。
+# 按 M5 分工，这一条投范例而不是往常驻 policy 里加字（policy 每次规划都付字符成本，
+# 首版 506 字符就把 navigation-with-stop 挤成过 `!clipped`）。
+# 2026-08-05 跨进程复验发现同域只注入一条：原文本词法分 0.4726，低于普通菜系
+# `nearby#9` 的 0.4967，导致边界范例从未进入 prompt。保留 eid、不追加重复条目，
+# 改用不同菜系和「先不用」的非同句表达；它对同一 case 的词法分 0.6899。
+- text: 找家湘菜馆，音乐就先不用放了
+  plan:
+  - agent: nearby
+    intent: nearby.search
+    slots:
+      cuisine: 湘菜
+  source: manual
+  added: '2026-08-04'
+  tags:
+  - badcase
+  note: 被取消的那半句一个 step 都不出——不是 media.play，也不是 media.pause
+# ── 2026-08-05 补：公共卫生设施仍是周边发现 ────────────────────────────────
+# 立卡来源 os.toilet.nearby 的跨进程方差，但不复制对抗原句。已有「这边有地铁站吗」只教
+# 交通设施，语义检索反而把「附近有洗手间吗」拉到 charging 的「附近有充电桩吗」；这里
+# 用另一种设施名与问法示范通用的公共设施发现，不在核心路由层加设施词表。
+- text: 这附近能找到公共厕所吗
+  plan:
+  - agent: nearby
+    intent: nearby.search
+    slots:
+      keyword: 公共厕所
+  source: manual
+  added: '2026-08-05'
+  tags:
+  - badcase
+  note: 附近公共设施查询归 nearby.search，不归任何车辆状态能力
+# ── 2026-08-13 补：品牌门店的**纯发现**句式（demo-mkemhn 3650e2b5）────────────
+# 「查询附近的瑞幸咖啡」被 planner 两连拒后掉进 chitchat，兜底凭历史编造
+# 「已为您找到 10 家门店，请选择其中一家」——无列表无卡片。纯门店发现归本域
+# （README「纯门店发现继续放 nearby.yaml」）；带下单/菜单目标的组合句归 luckin.yaml。
+- text: 查询附近的瑞幸咖啡
+  plan:
+  - agent: nearby
+    intent: nearby.search
+    slots:
+      brand: 瑞幸
+      keyword: 瑞幸咖啡
+  source: trace
+  added: '2026-08-13'
+  tags:
+  - badcase
+  note: demo-mkemhn 3650e2b5——纯发现句被 chitchat 编造门店列表
+# ── 2026-08-14 EVA 二轮批 E：语义类目 / 氛围属性 ─────────────────────────
+- text: 带孩子去附近能看看动物的地方
+  plan:
+  - agent: nearby
+    intent: nearby.search
+    slots:
+      category: 动物园
+  source: manual
+  added: '2026-08-14'
+  tags:
+  - canonical
+  note: 口语目标→类目语义（看动物=动物园），发现面归 nearby，不逐字搜「看看动物的地方」
+- text: 最近有点累，找个安静点的地方喝咖啡
+  plan:
+  - agent: nearby
+    intent: nearby.search
+    slots:
+      category: 咖啡
+  source: manual
+  added: '2026-08-14'
+  tags:
+  - canonical
+  note: 「安静」是氛围属性由能力侧软重排（标签+评分），不是目的地也不拆步
+- text: 帮我找杯咖啡喝
+  plan:
+  - agent: nearby
+    intent: nearby.search
+    slots:
+      keyword: 咖啡
+  source: manual
+  added: '2026-08-15'
+  tags:
+  - badcase
+  note: 「找杯咖啡」是发现不是下单——真栈实测被派去 luckin.order，回了「数量需要是 1 到 20 之间的整数」槽校验错误当话术；点单要有明确品牌/门店语境（台账 nearby-luckin 族）
+- text: 附近的咖啡店
+  plan:
+  - agent: nearby
+    intent: nearby.search
+    slots:
+      keyword: 咖啡店
+  source: manual
+  added: '2026-08-15'
+  tags:
+  - badcase
+  note: P6 省略动词的发现句：真栈被过度澄清「你想怎么处理附近的咖啡店？」——「附近的X」本身就是完整发现请求
+- text: 晚上7点的电影，先找个地方吃饭
+  plan:
+  - agent: nearby
+    intent: nearby.search
+    slots:
+      category: 餐饮
+  source: trace
+  added: '2026-08-15'
+  tags:
+  - badcase
+  note: E1 事件时刻+先吃饭：真栈一轮落 chitchat 反问「想吃什么类型」（plan_mode=toolcall_degraded），复跑 3/3 正常出候选。事件时刻由 agent 侧反推用餐窗，planner 只需落对域

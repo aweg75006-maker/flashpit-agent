@@ -1,0 +1,150 @@
+agent_id: info
+version: 0.2.0
+display_name: 信息助手
+category: core
+trust_level: first_party
+deployment: cloud
+# 信息类要联网搜索(Exa 18s)+LLM 接地合成(~10-20s)；深度调研动态开思考后合成更慢，给足 Execute 超时。
+# 这是超时上限（ceiling），天气/股票等快查询仍秒回，不增加其延迟。
+latency_budget_ms: 50000
+fallback: chitchat
+
+capabilities:
+  - intent: info.weather
+    description: 查询指定城市或当前位置的实时天气
+    slots: [city, date]
+    examples: ["今天天气怎么样", "北京天气如何", "上海现在多少度"]
+    # M2 Outcome Verifier 首批试点（查询面）：卡出来了但 data 空 = 假完成。
+    # on_fail: report——天气 provider 挂了重试也是挂，重试只增延迟不增成功率；
+    # 诚实告知比空转有用（真正该 retry 的是偶发空结果的检索类，见 nearby.search）。
+    verification:
+      mode: schema
+      on_fail: report
+      expect: { data_keys: [weather] }
+
+  - intent: info.forecast
+    description: 查询指定城市未来几天天气预报
+    slots: [city, days]
+    examples: ["明天天气怎么样", "北京未来三天天气", "后天会下雨吗", "这周天气预报"]
+
+  - intent: info.alerts
+    # 2026-07-30 地盘收口：裸问预警本身（有没有/几级/什么预警）归本条；
+    # 「这预警影响开车吗」「路上要注意什么」归 safety.weather_alert（同一批说法此前被两个域
+    # 各自声称，见 agents/road_safety/manifest.yaml 同日注释）。
+    description: 查询指定城市当前生效的天气预警本身（有没有、什么级别）；
+      问它对驾驶的影响归 safety.weather_alert
+    slots: [city]
+    examples: ["有没有天气预警", "北京有暴雨预警吗", "今天有极端天气吗", "暴雨预警了吗"]
+
+  - intent: info.indices
+    description: 查询城市生活指数（运动/洗车/紫外线等）
+    slots: [city]
+    examples: ["今天适合运动吗", "明天可以洗车吗", "紫外线强不强", "生活指数"]
+
+  - intent: info.air_quality
+    description: 查询城市实时空气质量（AQI/PM2.5/PM10等）
+    slots: [city]
+    examples: ["空气质量怎么样", "PM2.5多少", "今天空气好吗", "空气质量"]
+
+  - intent: info.search
+    description: 联网搜索实时、最新或你不确定的信息，回答**一个具体问题**：近期事件、价格、
+      榜单、发布、事实核查——凡答案会随时间变化的问题都用本能力，不要闲聊直答。
+      只想浏览一批资讯用新闻能力；要系统性了解一个主题用深度调研能力
+    slots: [query, limit]
+    heavy: true    # 联网搜索+接地合成 → 开思考+过程区
+    examples: ["搜一下固态电池最新进展", "帮我查一下iPhone现在的价格",
+               "昨晚发布会都发布了什么", "现在油价多少", "帮我搜"]
+
+  - intent: info.sports
+    description: 查询赛事比分、赛程与已结束赛果（足球，结构化真实数据）。
+      昨天/前天/昨晚的「那场比赛」等过去赛果，即使没说联赛或球队也归本能力，
+      通用联网搜索不是替代路由。仅限**已定事实**；预测/分析/谁会赢/前瞻走联网搜索能力
+    slots: [query, league]
+    examples: ["今天世界杯赛程", "世界杯比分", "英超赛果", "欧冠今晚有哪些比赛", "西甲对阵"]
+
+  - intent: info.news
+    description: 浏览新闻头条/资讯列表——想**看一批**新闻资讯时用（含「X最新消息/X最新动态」
+      这类想了解某主题近况的说法）；对某个具体问题要答案用搜索能力；要系统了解一个主题用
+      深度调研能力
+    slots: [topic, limit]
+    heavy: true    # 新闻汇总+接地合成 → 开思考+过程区
+    examples: ["今天有什么新闻", "科技新闻", "最新头条", "看看新闻",
+               "来点财经新闻", "英伟达最新消息"]
+
+  - intent: info.stock
+    description: 查询股票或大盘指数实时行情（仅证券——黄金/外汇/加密货币等价格走联网搜索）
+    slots: [symbol]
+    examples: ["茅台股价", "上证指数多少", "今天大盘怎么样", "查一下苹果股票"]
+
+# 确定性路由（R2.1）：弱 LLM 会把「巴西那场帮我看看详情」这类**赛事追问**误路由到 nearby.detail
+# （"看…详情"歧义）。这里用比 nearby 略高的优先级(58>55)把「那场/第N场 + 赛事细节词」召回 info.sports，
+# 由 sports handler 的 _league_from_history 从上轮回填联赛、_pick_fixture 定位到该场比赛详情。
+# guard 排除「电影/演唱会/景点」等同样用「场」的非赛事上下文（歧义时退化通用搜索，不误进周边）。
+route_hints:
+  # 【info.sports 的 route_hint 已于 2026-07-29 退役】判据：双臂裸跑
+  #   deepseek:deepseek-v4-flash / minimax:MiniMax-M3 各 ×2 轮，其 1 条命中语料**全覆盖**
+  #   （非抽样——抽 3 句会系统性高估，命中面越大的规则越容易被放行）；
+  #   摘掉它之后仍全部落对 → 模型 + 范例已经自己会了。
+  #   ⚠ 证据只覆盖上述两档。本 hint 家族当初是为 **MiMo** 写的
+  #     （route_hints.py 开篇：「弱 LLM（MiMo）常漏/误路由」），而本环境
+  #     MiMo 无可用 key（探针 all models failed），**切回 MiMo 须复验**。
+  #   回归保护未删：命中句已改端到端口径迁入 mode_routing_cases.yaml。
+  #   要恢复：git log -S '(那|这|上一?|哪)\s*一?\s*场[^，。' 找回原块。
+  # 2026-07-30 收窄（M5 P2 双臂裸跑抓到的真劫持）：「查一下这个地点」被本条 replace 成
+  # info.search，而它归 navigation.poi_detail——两档模型摘掉本 hint 后都落对，是规则把对的
+  # 踩成错的。修法不是给 guard 追「地点|地方|坐标」这类词（旧范式，词永远追不完），而是加一条
+  # **结构性**判据 `(这|那|它|该|此)[^，。！？]{0,3}$`：**句尾是纯指代短语＝没有可检索的实词**
+  # （这个地点/这家/它/此处），检索引擎拿它什么也搜不到，该交回 LLM 结合上下文判断。
+  # 指代词是**封闭语法类**，不是开放语义黑名单——不会越追越长。
+  # ⚠ 这条**必须放在 guard 而不是 pattern 的前瞻里**：放前瞻会被回溯绕过——动词交替里
+  #   `搜一下` 之后还有裸 `搜(?!索)`，「搜一下它」在前瞻挡住 `搜一下` 后退回裸 `搜`，
+  #   把「一下它」当成查询词照样命中（`查` 没有裸词分支所以看不出来，实测差分才暴露）。
+  #   guard 对整句 search、与动词怎么切无关。
+  - pattern: '^(?:请|麻烦|帮我|帮忙|给我){0,2}(?:上网|联网)?(?:搜索(?!引擎)|搜一下|搜下|搜搜|搜(?!索)|查一下|查下|查查|查一查|查询|检索|百度一下)\s*([^，。！？]{2,})'
+    guard: '(这|那|它|该|此)[^，。！？]{0,3}$|天气|气温|下雨|降雨|预报|空气质量|洗车|紫外线|指数|限行|股价|股票|大盘|行情|新闻|资讯|头条|要闻|比分|赛程|赛果|对阵|世界杯|欧冠|英超|西甲|中超|NBA|提醒|待办|日程|安排|订单|下单|支付|导航|路线|怎么走|附近|周边|加油站|充电桩|充电站|停车|餐厅|美食|电量|续航|里程|胎压|保养|油耗|说明书|手册|我的|我家|我老婆|我老公|的歌|歌曲|音乐|专辑|播放|深入|调研|研究一下'
+    intent: info.search
+    policy: replace
+    priority: 59
+    slots: {query: "$1"}
+
+  # b) 裸新闻/话题新闻 → info.news。slots 留空：topic 由 handler _extract_news_subject 从
+  #    raw_text 兜底提取（比捕获组稳）。整句 guard 只留媒体/提醒/搜查（播新闻=端侧
+  #    media.play；「搜一下今天的新闻」=刻意保守面，双 hint 互斥留给 LLM 判据）；
+  #    打开/关闭/订阅类 app 动作只危及话题式分支（「打开凤凰新闻」），收进该分支句内
+  #    前瞻——整句 guard 会误拦「打开空调然后来点新闻」这类多意图句的新闻子句。
+  - pattern: '(?:看看|看点|来点|来几条|有什么|有没有|有啥|讲讲|说说|刷刷|读读)[^，。！？]{0,6}(?:新闻|头条|资讯|要闻)|^(?:今天|今日|现在|最近)?(?:有什么|有啥)?(?:新闻|头条|资讯|要闻)$|^(?!.*(?:打开|关闭|订阅|设置))[一-鿿A-Za-z0-9·]{2,10}(?:的)?(?:新闻|资讯|最新消息|最新动态)$'
+    guard: '播|放|听|联播|提醒|搜|查'
+    intent: info.news
+    policy: replace
+    priority: 59
+    slots: {}
+
+  # d) 赛事预测/观点句 → info.sports（badcase f11aa344 复验：「今年世界杯决赛你更看好
+  #    哪支球队」无场次指代、无搜查动词——上面两条 hint 都接不住，planner 在 chitchat 与
+  #    检索之间掷硬币，落 chitchat 就答「我不太清楚」。收口成确定性：联赛/决赛词 ×
+  #    预测词共现 → info.sports，其 handler 的 _is_predictive 让路通用搜索并带
+  #    _predictive_redirect 指代锚点（完赛场次直接报结构化赛果），不误进赛程列表。
+  #    badcase bfb5d9c7：「这场比赛你预测谁会赢」无联赛词——补「这场/那场 × 预测词」
+  #    召回，靠 handler 从对话历史回填联赛与焦点日期。
+  #    guard 排除电影/彩票/官司等同样用「夺冠/看好/这场…谁会赢」的非赛事上下文。
+  # 【info.sports 的 route_hint 已于 2026-07-29 退役】判据：双臂裸跑
+  #   deepseek:deepseek-v4-flash / minimax:MiniMax-M3 各 ×2 轮，其 1 条命中语料**全覆盖**
+  #   （非抽样——抽 3 句会系统性高估，命中面越大的规则越容易被放行）；
+  #   摘掉它之后仍全部落对 → 模型 + 范例已经自己会了。
+  #   ⚠ 证据只覆盖上述两档。本 hint 家族当初是为 **MiMo** 写的
+  #     （route_hints.py 开篇：「弱 LLM（MiMo）常漏/误路由」），而本环境
+  #     MiMo 无可用 key（探针 all models failed），**切回 MiMo 须复验**。
+  #   回归保护未删：命中句已改端到端口径迁入 mode_routing_cases.yaml。
+  #   要恢复：git log -S '(世界杯|欧冠|欧联|英超|西甲|意甲|德甲|法' 找回原块。
+  - pattern: '(天气|下雨|下雪|气温)[^。！？]{0,14}(出行|出门|出去)|(适合|适不适合|能不能|可以)(出行|出门|出去)[^。！？]{0,12}(天气|下雨|下雪|气温)'
+    guard: '导航|路线|路况|怎么走|驾驶建议|高速'
+    intent: info.weather
+    policy: replace
+    priority: 57
+    slots: {}
+
+requires_permissions:
+  - network.external
+  - location.read
+edge_intents: []
+context_scopes: [location]   # 天气/本地搜索按当前位置反查城市

@@ -1,0 +1,254 @@
+# 跨域边界裁定台账（M5 P2 收口，2026-07-30）
+#
+# ## 它拦的是什么
+#
+# 范例库的 199 条初始金标来自 14 份 manifest 的 `examples`——而 **manifest examples 是
+# 「我这个能力能答这句」写出来的，天然不判别化**：写的人不会去想「这句是不是更该归别人」。
+# P1 把它们批量导入当金标时，把三处**过期/重叠的地盘声明**一起激活成了「判定尺自相矛盾」：
+#
+# | 冲突 | 表现 |
+# |---|---|
+# | navigation / charging / nearby 抢「找充电站」 | 同一族说法三个域各自声称；`nearby#1` 的 replace 正则把模型判对的 `charging.find` 踩成 `nearby.search`，而退役判定把「金标错了」读成了「规则失效了」 |
+# | navigation / nearby 抢「找个评分高的川菜馆」 | 两条 capability 描述几乎逐字重叠（都写「搜 POI（餐厅/充电站/加油站/停车场）」），planner 只能掷硬币，于是正则被拉来当裁判 |
+# | info.alerts / safety.weather_alert 抢「有天气预警吗」 | 描述是判别的（后者是「对驾驶的影响」），但**例句一句也不体现驾驶角度**，只差语气词 |
+#
+# 教训一句话：**盘活死资产的同时也会把死资产里的错误一起激活**；地盘搬家必须全局收口。
+#
+# ## 为什么是台账而不是阈值
+#
+# 试过了，机械判定不成立。实测（204 条语料的全部跨域对，真栈 Embed）：
+#
+# | 相似度 | 对 | 是冲突吗 |
+# |---|---|---|
+# | lex 0.689 / cos 0.958 | 有没有天气预警 ↔ 有天气预警吗 | **是** |
+# | lex 0.450 / cos 0.885 | 搜一下固态电池最新进展 ↔ 深入调研一下固态电池现状 | **不是**（四模式路由的核心区分：直答 vs 深调研） |
+# | lex 0.483 / cos 0.773 | 北京有暴雨预警吗 ↔ 暴雨预警了吗 | **是** |
+# | lex 0.579 / cos 0.613 | 看看我的待办 ↔ 看看我的场景 | **不是** |
+#
+# **假冲突的相似度可以高于真冲突**（0.885 > 0.773），词法与语义两个通道都是如此。
+# 「说的是不是同一件事」需要产品判断，机器做不了。所以分工换成：
+# **人裁一次并登记，机器只负责「不许悄悄新增」。**
+#
+# ## 门禁（离线评估车道 1，阻断，零网络）
+#
+# 扫描范例库全部跨域对，IDF 加权 Dice ≥ `lex_min` 的必须在本表登记；
+# - **未登记 → 阻断**，要求裁定一次；
+# - 裁定为「两回事」→ 登记到 `rulings` 并写 `why`；
+# - 裁定为**冲突** → **改金标（改域/改例句），不许登记**——本表只进「两回事」；
+# - 台账里两端文本已不在语料中的条目 → 也阻断（**台账只进不出会腐烂**）。
+#
+# `lex_min` 不是拍的：拿上面三起真冲突反验，0.35 全部能抓到——
+# 「附近的充电站 ↔ 找个充电站」0.435、「找个评分高的川菜馆 ↔ 附近评分高的火锅」0.407、
+# 「有没有天气预警 ↔ 有天气预警吗」0.689。**先验证门禁抓得住它本来该抓的缺陷，再启用它。**
+# （另一侧的证据：「附近的充电站 ↔ 附近有充电桩吗」只有 0.288——单看这一对会漏，
+#   但同一起冲突里总有更近的一对把它带出来，故按「对」判而不是按「条」判。）
+# 语义通道刻意不进本门禁：车道 1 的契约是零网络（llm-gateway 不可达时不能变成 CI 红灯）。
+
+lex_min: 0.35
+
+rulings:
+  - id: reminder-scene.todo-list-vs-scene-list
+    texts: [看看我的待办, 看看我的场景]
+    domains: [reminder, scene]
+    why: 对象不同——待办清单 vs 场景清单；共享的只是「看看我的」这个框架
+
+  - id: reminder-scene.which-reminders-vs-which-scenes
+    texts: [我有哪些提醒, 有哪些场景模式]
+    domains: [reminder, scene]
+    why: 同上，对象不同
+
+  - id: info-reminder.news-vs-schedule
+    texts: [今天有什么新闻, 我今天有什么安排]
+    domains: [info, reminder]
+    why: 新闻是外部资讯、安排是用户自己的日程；「今天有什么」是问句框架不是地盘
+
+  - id: info-reminder.news-vs-tomorrow-reminder
+    texts: [今天有什么新闻, 明天有什么提醒]
+    domains: [info, reminder]
+    why: 同上
+
+  - id: info-reminder.news-vs-three-day-reminder
+    texts: [今天有什么新闻, 未来三天有什么提醒]
+    domains: [info, reminder]
+    why: 同上
+
+  - id: info-reminder.forecast-vs-three-day-reminder
+    texts: [北京未来三天天气, 未来三天有什么提醒]
+    domains: [info, reminder]
+    why: 共享的是时间范围表达（未来三天），对象是天气 vs 提醒
+
+  - id: info-safety.life-index-vs-driving-advice
+    texts: [今天适合运动吗, 今天适合开车吗]
+    domains: [info, safety]
+    why: 生活指数（运动/洗车/紫外线）vs 驾驶安全建议；「今天适合X吗」是框架
+
+  - id: info-research.search-vs-deep-research
+    texts: [搜一下固态电池最新进展, 深入调研一下固态电池现状]
+    domains: [info, research]
+    why: 四模式路由的**核心区分**——一次检索直答 vs 分钟级深调研流水线。
+      同一个主题词是必然的（研究什么就搜什么），区分在动词与深度诉求
+
+  - id: nearby-safety.poi-vs-road-condition
+    texts: [这家怎么样, 路上怎么样]
+    domains: [nearby, safety]
+    why: 「怎么样」是万能问句框架；对象是某个 POI vs 前方路况
+
+  - id: nearby-safety.poi-vs-traffic
+    texts: [这家怎么样, 路况怎么样]
+    domains: [nearby, safety]
+    why: 同上
+
+  - id: info-nearby.weather-vs-poi
+    texts: [今天天气怎么样, 这家怎么样]
+    domains: [info, nearby]
+    why: 同上——「怎么样」框架
+
+  - id: info-safety.weather-vs-road-condition
+    texts: [今天天气怎么样, 路上怎么样]
+    domains: [info, safety]
+    why: 「怎么样」框架的**第三条腿**（另两条：nearby-safety.poi-vs-road-condition、
+      info-nearby.weather-vs-poi）；对象是天气 vs 前方路况，两回事。
+      ⚠ 它 2026-08-28 才被顶过阈值，**不是因为语料里新增了相似句**——
+      是因为 C14 往 charging 域加了两条范例，而 IDF 是**语料级**的量：
+      加任何一条范例都会改变全表词权，相邻对的分数跟着浮动（0.349→0.351）。
+      **这条门禁的读数是相对的，别把它读成「谁把冲突引进来了」。**
+
+  - id: charging-nearby.charger-vs-restaurant
+    texts: [附近的充电站, 附近的餐厅]
+    domains: [charging, nearby]
+    why: 2026-07-30 裁定后的**正确**边界——充电桩归 charging.find（读真实 SOC、
+      按空闲优先排序、可作导航途经点），生活服务发现归 nearby.search（评分/人均/营业中富卡）。
+      「附近的X」是框架，相似度高是应然
+
+  - id: charging-nearby.charger-vs-attraction
+    texts: [附近的充电站, 附近的景点]
+    domains: [charging, nearby]
+    why: 同上
+
+  - id: charging-nearby.charger-vs-hotel
+    texts: [附近的充电站, 附近的酒店]
+    domains: [charging, nearby]
+    why: 同上
+
+  - id: navigation-trip.go-home-vs-reschedule
+    texts: [回家, 想提前回家]
+    domains: [navigation, trip]
+    why: 裸「回家」是导航到常用地点；「想提前回家」是在既有行程里改期（trip.reschedule）。
+      **这一对很近，是真实的易错边界**——留在台账里当提醒
+
+  - id: navigation-vision.where-vs-what
+    texts: [这是哪里, 这是什么]
+    domains: [navigation, vision]
+    why: 问位置 vs 问车外画面里的物体。**历史事故正出在这条边界上**：
+      vision 的 route_hint 曾把「这个坐标是什么地方」劫持进视觉问答（M5 P2 首条退役的规则）
+
+  - id: navigation-vision.coordinate-vs-visual
+    texts: [这个坐标是什么地方, 看看这个是什么]
+    domains: [navigation, vision]
+    why: 同上——坐标反查 vs 视觉描述。登记它是为了让这条边界一直被看见
+
+  - id: info-safety.weather-alert
+    texts: [有没有天气预警, 这天气预警影响开车吗]
+    domains: [info, safety]
+    why: 2026-07-30 改判后的**正确**边界——裸问预警本身归 info.alerts，
+      问它对驾驶的影响归 safety.weather_alert。改判前这一对是 0.689/cos 0.958 的真冲突
+
+  # ── 2026-08-02 意图落域对抗测试补裁（泓舟）：findings §4.1 点名「台账里没有这条裁定」的两组 ──
+  - id: nearby-navigation.find-vs-go
+    texts: [油不多了，附近哪儿有加油站, 导航去最近的加油站]
+    domains: [nearby, navigation]
+    why: 2026-08-02 裁定——**边界按动词划，不按对象划**：「找/搜/附近有什么」一律
+      nearby.search（周边发现，出富数据卡片），「导航去/带我去」才归 navigation。
+      于是「我要加油」是找加油站（nearby.search），不是开油箱盖、也不是发起导航。
+      这一对对象完全相同、只差动词，正是这条判据的载体
+
+  # ── 2026-08-04 意图落域对抗测试补裁（泓舟）：`ex.homophone.charging` 落错的真因 ──
+  - id: charging-nearby.charger-vs-gas-station
+    texts: [附近哪儿有冲电的地方, 油不多了，附近哪儿有加油站]
+    domains: [charging, nearby]
+    why: 2026-08-04 裁定——**「边界按动词划」是通则，充电桩是这条通则的特例**。
+      台账里此前有两条裁定，在这一句话上正面打架：`nearby-navigation.find-vs-go` 说
+      「找/搜/附近哪儿有」一律 nearby.search（连加油站都归 nearby），
+      `charging-nearby.charger-vs-*` 说充电桩归 charging.find。实测代价可量：
+      `ex.homophone.charging`「附近哪里能冲电」落 `nearby.search`，检索名单里最近的
+      恰恰是加油站那条范例。特例的理由是**能力差异不是措辞差异**：charging.find 读
+      真实 SOC、按空闲/功率排序、可直接作导航途经点，而 nearby.search 出的是评分/
+      人均富卡——加油站没有这层车端状态耦合，所以它留在通则里。
+      **两条裁定各自都对，缺的是它们相交处的那一条**，这就是它。
+  - id: charging-navigation.find-charger-vs-self-locate
+    texts: [快充在哪, 我在哪]
+    domains: [charging, navigation]
+    why: 「快充」点名的是补能设施，产出充电站候选，归 charging.find；「我」问的是
+      当前车辆位置，产出自车定位，归 navigation.locate。共享的「在哪」只是疑问框架，
+      不能抹掉被查询对象。2026-08-12 商户范例扩容后 IDF 重算使该既有对从 0.35 下方
+      越过门禁阈值，按实际门禁补裁，不以调阈值掩盖边界
+  - id: manual-vision.described-light-vs-unknown-light
+    texts: [仪表盘上的红色感叹号是什么意思, 看看这个是什么]
+    domains: [manual, vision]
+    why: 2026-08-02 裁定——**用户已经把对象描述清楚了就不用再看一眼**：带颜色/类型
+      描述的仪表灯归 manual.query（说明书直接给含义与处置），只有描述不足以定位对象时
+      才走 vision.describe 抓帧。判据是隐私侧的：抓帧是敏感动作，能不抓就不抓
+
+  # ── 真实商户 MCP（2026-08-11 麦当劳/瑞幸 v1 激活）──
+  - id: luckin-shop.order-ready-brand-vs-demo
+    texts: [瑞幸咖啡做好了吗, 我那杯咖啡好了吗]
+    domains: [luckin, shop]
+    why: 品牌词是判据——带「瑞幸」查真商户（luckin MCP），裸「咖啡」指最近一单
+      （demo 商户）；共享的只是「做好了吗」问句框架。无品牌歧义句的宽口径由对抗
+      语料 cc.contrast.brandless-order-query 锁定（三家查单都算对）
+
+  - id: luckin-mcd.menu-store-resolution
+    texts: [附近的瑞幸有什么可以点的, 这家麦当劳有什么可以点的]
+    domains: [nearby, mcd]
+    why: 句式几乎相同，首步却**必须**不同——两家的选店机制本来就不是一回事。
+      瑞幸官方菜单绑 deptId，而 deptId 只能由 nearby.search 的**可信公开 POI**
+      （name+经纬度同条）映射出来，所以「附近的瑞幸…」首步必须是 nearby.search；
+      麦当劳按 `store_hint` 文本关键词查官方门店，不消费 POI，直接落 mcd.menu。
+      **这不是地盘冲突，是两家商户接口形态的差异**：把麦当劳也强行加一步 nearby
+      只会多一次无用检索，把瑞幸直接落 luckin.menu 则拿不到可信坐标、必然被拒。
+
+  - id: mcd-nearby.menu-vs-discovery
+    texts: [麦当劳有什么吃的, 附近有什么好吃的]
+    domains: [mcd, nearby]
+    why: 前者问品牌餐品目录（mcd.menu 当店菜单带价格 / mcd.nutrition 营养成分），后者是周边发现（高德 POI）
+      ——「有什么吃的」是框架；带具体品牌名问商品归商户域，带「附近」问场所归 nearby
+
+  - id: nearby-luckin.pure-discovery-vs-discover-then-menu
+    texts: [查询附近的瑞幸咖啡, 附近的瑞幸有什么可以点的]
+    domains: [nearby, luckin]
+    why: 纯门店发现（只要列表）vs 发现+看单组合（「有什么可以点的」带菜单目标，
+      续接 luckin.menu 可信链）。共享的只是「附近的瑞幸」这个采集前缀；
+      README「纯门店发现继续放 nearby.yaml」正是这条边界的成文形态
+
+  - id: luckin-mcd.swap-store-keep-item
+    texts: [换一家瑞幸门店，还是点埃塞瑰夏冷萃, 换一家麦当劳门店，还是点蘸酱麦辣大四角]
+    domains: [luckin, mcd]
+    why: 句式同构但计划形态本质不同——瑞幸必须 nearby.search 重建坐标可信链
+      （官方门店绑 deptId），麦当劳走 store_hint 文本由桥内重选。品牌词就是判据，
+      两条各教各的接线方式，不构成地盘冲突
+
+  - id: navigation-trip.reroute-vs-modify
+    texts: [刚才那个途经点不去了, 不去千岛湖了]
+    domains: [navigation, trip]
+    why: 对象与会话状态不同——改**当前正在进行的这次导航**（途经点/路线/目的地，
+      判据是焦点里的「当前正在导航」行，G8）vs 改多日行程的停靠点（「第N天」/
+      行程语境）。共享的只是「不去…了」这个否定框架；两侧各自的宾语类型
+      （路线途经点 vs 行程景点）加会话状态才是判据（RFC 2026-08-15-g8）
+
+  - id: chitchat-reminder.statement-vs-request
+    texts: [我女儿这周六下午三点有个钢琴比赛, 周五下午三点叫我去接孩子]
+    domains: [chitchat, reminder]
+    why: 陈述未来事件（让系统「知道」）vs 显式提醒请求（「提醒我/叫我」，让系统
+      「到点叫」）。陈述句由记忆抽取异步接住、发 G7 询问式提醒建议卡，planner 抢答
+      成 reminder NEED_SLOT 会双通道抢话且挂起会话吞后续句（挂起黑洞族）；
+      批 D（32fcdaf）已拍板 reminder 的创建入口是用户对 offer 的肯定答复
+
+  - id: navigation-nearby.pickup-plus-meal
+    texts: [先去接我儿子，再找家川菜馆, 找家川菜馆]
+    domains: [navigation, nearby]
+    why: 接送复合句有**两半**，纯周边搜索只有一半。真栈实测（person-pickup 卡 §6）：
+      「先去接我儿子，再找家川菜馆」三次取样**逐字相同地只答川菜那半**、「接谁」
+      整个被丢掉——而川菜那半答得相当好（还用上了「不吃辣」的记忆），所以话术层
+      根本看不出缺了一块。共享的只是「找家川菜馆」这个宾语；判据是**有没有接送人称**
+      （`接/送 + 人称词`），有就是一趟带顺路停靠的导航（destination=人称词、
+      吃饭那半是 stop_category），没有才是纯 POI 搜索。不构成地盘冲突

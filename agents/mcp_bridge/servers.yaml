@@ -1,0 +1,543 @@
+# MCP 准入清单（M3 P2）—— **唯一准入依据，改这个文件 + 人工审才能接新工具**。
+#
+# 母提案 §4.F「MCP 动态放行注册」是明确的不做项：外部服务改了接口，我们必须重新审，
+# 而不是自动接受。所以这里同时锁三样东西：
+#   1. server 版本（`version` 与 server 自报的 serverInfo.version **逐字相等**，否则拒载；
+#      **远程托管 server 留空**——平台版本随平台升级，锁定粒度收敛到工具级 schema_sha，§9.9）
+#   2. tool 白名单（server 多提供的工具直接忽略；清单里有而 server 没有 → 记拒绝理由）
+#   3. tool schema 指纹（`schema_sha`，接口变了就拒载重审；留空=首次接入，只记录不校验）
+#
+# 写操作额外强制：显式幂等模式 + `require_confirm: true` + 补偿声明。`tool` 须给
+# 通过准入的 `compensate_tool`；`abandon_unpaid` 须在 confirm_prompt 确定性说明
+# 「不支付会自动取消/失效/过期」；`terminal` 只用于取消等生命周期终态动作。
+#
+# 批 3 起支持 `transport: streamable_http`（仅官方商户远程端点）：`url` + `headers`
+# （值可 `${ENV_VAR}` 引用——token 不进本文件；**缺 env 该 server 整台拒载**）。
+# 商户下单回支付链接的，声明 `pay_url_locator`（点路径）+ `pay_url_hosts`（域名白
+# 名单第一层）→ 桥经 payment-gateway 登记 merchant_hosted 会话出付款码卡（§9.17）。
+#
+# 契约登记见 docs/conventions.md §9.9。
+
+local_capabilities:
+  # Bridge-owned deterministic lifecycle operation.  It never calls a merchant
+  # MCP tool and never touches the real-order ledger; the handler is allow-listed
+  # by admission.py and narrows deletion to authenticated user + current session.
+  - intent: shop.preview_discard
+    handler: session_preview_discard
+    expose: true
+    require_confirm: false
+    required_scopes: [merchant.write]
+    description: 取消或清理本次会话的商户订单预览/下单草稿；仅处理当前账号当前会话的临时预览，不取消真实订单，不处理历史订单
+    examples: ["清理本次会话的订单预览", "取消本次订单预览"]
+    slots: []
+
+servers:
+  - id: demo-coffee
+    # **演示商户**：真实商户的替身，存在的唯一目的是让写操作生命周期能在真栈被验证。
+    # demo: true → 卡片打 _prov=demo + HMI「演示商户」角标 + 话术明说（诚实标注是硬要求）。
+    demo: true
+    trust: third_party
+    transport: stdio
+    command: ["python", "-m", "agents.mcp_bridge.demo_servers.demo_coffee"]
+    version: "0.1.0"
+    startup_timeout_ms: 20000
+    tools:
+      # ── 只读 ──
+      - name: menu.list
+        intent: shop.menu
+        write: false
+        expose: true
+        forward_owner: true
+        required_scopes: []
+        idempotency_mode: none
+        retry_policy: safe
+        schema_sha: "f46214ddb414"
+        description: 查看演示咖啡店的菜单与价格（演示商户，非真实品牌；瑞幸/麦当劳等真实门店的菜单请用对应品牌能力，不适用本工具）
+        slots: []
+        examples: ["咖啡有什么", "看看咖啡菜单", "咖啡多少钱"]
+        timeout_ms: 8000
+      # ── 可确认写入（生命周期五项齐备才允许准入）──
+      - name: order.create
+        intent: shop.order
+        write: true
+        require_confirm: true          # 中央确认闸（M0a）会强制落实，Agent 漏标也拦得住
+        expose: true
+        forward_owner: true
+        required_scopes: []
+        idempotency_mode: upstream
+        retry_policy: never
+        timeout_outcome: uncertain
+        idempotency_key_arg: idempotency_key
+        compensate_tool: order.cancel  # 缺它 → admission 拒载
+        schema_sha: "041a13dc1703"
+        description: 在演示咖啡店下单一杯咖啡（仅限拿铁/美式/摩卡等演示饮品；麦当劳/瑞幸等真实品牌的餐饮下单暂未接入，不适用本工具）
+        confirm_prompt: "准备下单：{args}，确认吗？"
+        # 规划期槽位用自然词（LLM 会填 item/size），经 arg_map 翻成商户的参数名
+        slots: [item, size]
+        arg_map: {item: sku, size: size}
+        examples: ["点一杯拿铁", "来杯大杯美式", "帮我买杯咖啡"]
+        timeout_ms: 15000
+      # ── 查单（只读）──
+      # M-D：**「查一下我的订单」此前是一句空话**——话术承诺过它，而准入清单里
+      # 只有 menu/order（验收抓到后先把话术改成不承诺）。这条补上真入口。
+      # 它同时是「超时到底下没下成」的核对手段：下单超时那一单我们没有 order_id
+      # （响应没回来），但幂等键是我们自己生成的、商户按它索引。
+      - name: order.get
+        intent: shop.order_status
+        write: false
+        expose: true
+        forward_owner: true
+        required_scopes: [merchant.read]
+        idempotency_mode: none
+        retry_policy: safe
+        schema_sha: "df8761c5f320"
+        description: 查询咖啡订单的状态（演示商户）
+        slots: [order_id]
+        examples: ["查一下我的订单", "我那杯咖啡好了吗", "刚才的单子怎么样了"]
+        timeout_ms: 8000
+      # ── 取消（可确认写入）──
+      # `order.cancel` 从一开始就在商户侧存在、也被 order.create 声明为
+      # compensate_tool，但**从没进过准入清单**——于是补偿只在准入期被校验存在性，
+      # 运行期零调用、用户零入口（验收原话）。放进来它才成为真实可达的能力。
+      # 仍是写操作：走 require_confirm，中央闸兜底；**不做未经确认的自动补偿**。
+      - name: order.cancel
+        intent: shop.order_cancel
+        write: true
+        require_confirm: true
+        expose: true
+        forward_owner: true
+        required_scopes: []
+        idempotency_mode: local_at_most_once
+        retry_policy: never
+        timeout_outcome: uncertain
+        idempotency_key_arg: ""
+        compensate_policy: terminal
+        schema_sha: "943700876d93"
+        description: 取消咖啡订单并退款（演示商户，不产生真实交易）
+        confirm_prompt: "准备取消订单 {args} 并退款，确认吗？"
+        slots: [order_id]
+        examples: ["取消我的咖啡订单", "那杯咖啡不要了", "帮我把订单退了"]
+        timeout_ms: 12000
+
+  # ══════════════════════════════════════════════════════════════════
+  # 麦当劳官方 MCP（2026-08-11 真机核实激活：serverInfo=mcd-mcp 1.0.0，29 工具，
+  # tools/list 快照与全量 inputSchema 见当日会话产物；schema_sha 按真机指纹锁死）。
+  #
+  # 下单链由桥内确定性 workflow 组装 typed items；Planner 只接触自然语言标量，
+  # 低层工具全部 expose=false。29 工具中无取消类工具，因此创建的是未支付订单，
+  # 用户不支付时由商户自动失效（abandon_unpaid），不会伪称远程取消成功。
+  - id: mcdonalds
+    demo: false
+    trust: third_party
+    transport: streamable_http
+    url: https://mcp.mcd.cn
+    headers:
+      Authorization: "Bearer ${MCD_MCP_TOKEN}"
+    version: ""                    # 远程托管平台：版本不锁（自报 1.0.0），工具级 schema_sha 锁
+    startup_timeout_ms: 20000
+    pay_url_hosts: [m.mcd.cn]      # 二期下单用；只读工具不产链接
+    # 商品图 CDN（2026-08-13 真机取证：query-meals 的 meals.<code>.image 全在此域）
+    image_hosts: [menu-img.mcd.cn]
+    tools:
+      - name: list-nutrition-foods
+        intent: mcd.nutrition
+        speech_mode: summarize
+        write: false
+        expose: true
+        forward_owner: false
+        required_scopes: []
+        idempotency_mode: none
+        retry_policy: safe
+        schema_sha: "9e2fcd061b03"
+        # 诚实描述：这是常见餐品与营养成分（能量/蛋白质等），不是当店实时价目——
+        # 带价格的当店菜单（query-meals）required storeCode，归二期多步链
+        # 2026-08-13 由 mcd.menu 改名 mcd.nutrition：它返回的一直是营养成分不是菜单，
+        # 而「菜单」这个词被用户用来问价格——旧名让「麦满分多少钱」只能诚实回答
+        # 「这个接口里只有营养信息」（trace c523c303，demo-2goetq）。当店菜单归 mcd.menu。
+        description: 麦当劳餐品的营养成分（热量/蛋白质等）；**不含价格**，问价格或当店在售请用当店菜单
+        slots: []
+        examples: ["巨无霸多少大卡", "麦当劳哪个热量低", "麦辣鸡腿堡的蛋白质"]
+        timeout_ms: 12000
+      - name: query-order
+        intent: mcd.order_status
+        speech_mode: summarize
+        write: false
+        expose: true
+        forward_owner: false
+        required_scopes: [merchant.read]
+        idempotency_mode: none
+        retry_policy: safe
+        schema_sha: "6c5c0def4de0"
+        description: 查询麦当劳订单状态与配送进度（商家是订单状态的真相源）
+        slots: [order_id]
+        arg_map: {order_id: orderId}
+        success_predicate: {success: [true], code: [200]}
+        result_map:
+          order_id: data.orderId
+          status: data.orderStatus
+          amount_cents: data.realTotalAmount
+        status_map:
+          待支付: 待支付
+          配餐中-已支付: 配餐中
+          配餐中-餐厅确认配餐中: 配餐中
+          配送中: 配送中
+          已完成: 已完成
+          已取消: 订单已取消
+          订单已取消: 订单已取消
+          已评价: 已完成
+        amount_unit: yuan
+        examples: ["我的麦当劳订单到哪了", "麦当劳那单好了吗"]
+        timeout_ms: 12000
+      - name: query-nearby-stores
+        intent: mcd.internal.query_nearby_stores
+        write: false
+        expose: false
+        forward_owner: false
+        required_scopes: [merchant.read]
+        idempotency_mode: none
+        retry_policy: safe
+        schema_sha: "235a50ac3f94"
+        # searchType **不写死**（2026-08-14 真机 schema 取证）：1=搜索**收藏餐厅**、
+        # 2=按位置搜索（city+keyword 必填）。此前写死 1，「附近的麦当劳」永远只会
+        # 查到测试账号收藏的碧海君庭一家——workflow 按有无位置线索动态选档。
+        const_args: {beType: 1}
+        timeout_ms: 15000
+      - name: query-meals
+        intent: mcd.internal.query_meals
+        write: false
+        expose: false
+        forward_owner: false
+        required_scopes: [merchant.read]
+        idempotency_mode: none
+        retry_policy: safe
+        schema_sha: "ccfacc629a1f"
+        const_args: {orderType: 1, beType: 1}
+        timeout_ms: 15000
+      - name: query-meal-detail
+        intent: mcd.internal.query_meal_detail
+        write: false
+        expose: false
+        forward_owner: false
+        required_scopes: [merchant.write]
+        idempotency_mode: none
+        retry_policy: safe
+        schema_sha: "2dc343f13d94"
+        const_args: {orderType: 1, beType: 1}
+        timeout_ms: 15000
+      - name: calculate-price
+        intent: mcd.internal.calculate_price
+        write: false
+        expose: false
+        forward_owner: false
+        required_scopes: [merchant.write]
+        idempotency_mode: none
+        retry_policy: safe
+        schema_sha: "b25bd7d955a0"
+        const_args: {orderType: 1, beType: 1}
+        timeout_ms: 15000
+      - name: create-order
+        intent: mcd.internal.create_order
+        write: true
+        expose: false
+        require_confirm: true
+        forward_owner: false
+        required_scopes: [merchant.write]
+        idempotency_mode: local_at_most_once
+        retry_policy: never
+        timeout_outcome: uncertain
+        idempotency_key_arg: ""
+        compensate_policy: abandon_unpaid
+        unpaid_expiry: true
+        pay_url_locator: data.payH5Url
+        amount_locator: data.orderDetail.realTotalAmount
+        amount_unit: yuan
+        success_predicate: {success: [true], code: [200]}
+        schema_sha: "0bee66827dd1"
+        const_args: {orderType: 1, beType: 1}
+        confirm_prompt: "确认后将创建麦当劳未支付订单；不支付会由商户自动失效。"
+        timeout_ms: 20000
+    workflows:
+      - intent: mcd.order
+        handler: mcdonalds
+        required_tools:
+          - query-nearby-stores
+          - query-meals
+          - query-meal-detail
+          - calculate-price
+          - create-order
+        required_scopes: [merchant.read, merchant.write]
+        require_confirm: true
+        expose: true
+        description: 选择麦当劳门店和餐品、核价确认后创建未支付订单
+        slots: [item_query, quantity, store_hint, city, pickup_mode, checkout_token]
+        # Q10 双入口收敛：「点第一个」「点巨无霸」先在**上一轮那张卡的候选集**里
+        # 确定性翻译成商家原名，再进既有选品链——与点按钮送出的 send_text 逐字同路。
+        candidate_slot: item_query
+        # C3 槽位值形状：`item_query` 是**一个餐品/商品名**，不是一句话。
+        # 真栈 T44-T46：一条 `item_query` 挂起把「附近的川菜馆」「…哪个贵」
+        # 整句吞进去当搜索词，连答三轮「没查到"<用户那句话>"」。判据本体在
+        # `orchestrator/cloud/slot_shape.py`（零领域词），这里只声明名字。
+        slot_shapes: {item_query: item_name}
+        examples: ["在麦当劳点一份巨无霸套餐", "麦当劳来两份麦辣鸡腿堡到店自取"]
+      # 当店菜单（2026-08-13）：官方 query-meals 返回真正的全店菜单——categories +
+      # meals（每条带 name / image / currentPrice / originalPrice），比营养表能回答
+      # 用户真正在问的「有什么、多少钱」。与瑞幸 luckin.menu 对称，只读、不进确认闸。
+      - intent: mcd.menu
+        handler: mcdonalds
+        required_tools:
+          - query-nearby-stores
+          - query-meals
+        required_scopes: [merchant.read]
+        require_confirm: false
+        expose: true
+        # 「就近」要靠 nearby.search 供门店名（store_hint）——本能力自己拿不到位置
+        # （GPS 不下发第三方桥），没有 hint 时商户接口给的是**默认店不是就近店**
+        # （demo-3ukshz：附近的麦当劳答成十公里外的碧海君庭）。examples 刻意不写
+        # 「附近」句式：那类话术该由范例教成 nearby.search→mcd.menu 两步。
+        description: 查看某家麦当劳门店在售的餐品与价格（只读，不下单，支持按分类浏览）；「附近的麦当劳」需先经周边搜索取得门店名再传入 store_hint
+        slots: [store_hint, city, item_query, category]
+        candidate_slot: item_query
+        slot_shapes: {item_query: item_name}   # C3 值形状，理由见 mcd.order 那处
+        examples: ["看看这家麦当劳的菜单", "麦当劳早餐多少钱", "看看麦当劳的汉堡类"]
+
+  # ── 瑞幸官方 MCP（2026-08-11 真机核实激活：serverInfo=luckyordermcpmaster 1.0.0，
+  # 8 工具）。门店发现仍归 nearby.search；workflow 只接受同一公开 POI 的可信
+  # name/lng/lat 引用，再用官方 queryShopList 映射 deptId，绝不把座舱 GPS 静默下发。
+  # 商品规格与 productList 均由桥内 codec 从官方 detail/switch/preview 结果构造。
+  - id: luckin
+    demo: false
+    trust: third_party
+    transport: streamable_http
+    url: https://gwmcp.lkcoffee.com/order/user/mcp
+    headers:
+      Authorization: "Bearer ${LUCKIN_MCP_TOKEN}"
+    version: ""                    # 远程托管平台：版本不锁（自报 1.0.0），工具级 schema_sha 锁
+    startup_timeout_ms: 20000
+    pay_url_hosts: [open.lkcoffee.com]  # 2026-08-12 createOrder 真栈取证
+    # 商品图 CDN（2026-08-13 真机取证：searchProductForMcp 每条商品带 pictureUrl，
+    # 全部 https + img04.luckincoffeecdn.com + .png 无 query）。精确域名不写通配符：
+    # 商户换到 img05 时图会静默消失退回纯文字，这个降级方向是对的。
+    image_hosts: [img04.luckincoffeecdn.com]
+    tools:
+      - name: queryOrderDetailInfo
+        intent: luckin.order_status
+        speech_mode: summarize
+        write: false
+        expose: true
+        forward_owner: false
+        required_scopes: [merchant.read]
+        idempotency_mode: none
+        retry_policy: safe
+        schema_sha: "095c2b916b52"
+        description: 查询瑞幸咖啡订单详情与状态（商家是订单状态的真相源）
+        slots: [order_id]
+        arg_map: {order_id: orderId}
+        success_predicate: {success: [true], code: [0]}
+        result_map:
+          order_id: data.orderId
+          status: data.orderStatusName
+          amount_cents: data.orderPayAmount
+        status_map:
+          待支付: 待支付
+          待付款: 待支付
+          未支付: 待支付
+          已创建: 待支付
+          制作中: 制作中
+          备餐中: 制作中
+          制作完成: 待取餐
+          待取餐: 待取餐
+          已完成: 已完成
+          已取餐: 已完成
+          已取消: 已取消
+          取消成功: 已取消
+        amount_unit: yuan
+        examples: ["我瑞幸的单子怎么样了", "瑞幸咖啡做好了吗", "查一下瑞幸订单"]
+        timeout_ms: 12000
+      - name: queryShopList
+        intent: luckin.internal.query_shop_list
+        write: false
+        expose: false
+        forward_owner: false
+        # 只读工具归 merchant.read：luckin.menu（只读看菜单）才不必要求下单权限。
+        # 准入校验按「workflow 必须覆盖内部工具的 scope 并集」判，故 luckin.order
+        # 同步声明两者——它确实两样都用。
+        required_scopes: [merchant.read]
+        idempotency_mode: none
+        retry_policy: safe
+        schema_sha: "cee4310bfb4d"
+        timeout_ms: 15000
+      - name: searchProductForMcp
+        intent: luckin.internal.search_product
+        write: false
+        expose: false
+        forward_owner: false
+        required_scopes: [merchant.read]
+        idempotency_mode: none
+        retry_policy: safe
+        schema_sha: "c4426494a931"
+        timeout_ms: 15000
+      - name: queryProductDetailInfo
+        intent: luckin.internal.product_detail
+        write: false
+        expose: false
+        forward_owner: false
+        required_scopes: [merchant.write]
+        idempotency_mode: none
+        retry_policy: safe
+        schema_sha: "dfb46188253d"
+        timeout_ms: 15000
+      - name: switchProduct
+        intent: luckin.internal.switch_product
+        write: false
+        expose: false
+        forward_owner: false
+        required_scopes: [merchant.write]
+        idempotency_mode: none
+        retry_policy: safe
+        schema_sha: "f2bb3c6177ff"
+        timeout_ms: 15000
+      - name: previewOrder
+        intent: luckin.internal.preview_order
+        write: false
+        expose: false
+        forward_owner: false
+        required_scopes: [merchant.write]
+        idempotency_mode: none
+        retry_policy: safe
+        schema_sha: "6ef3aceeab1f"
+        timeout_ms: 15000
+      - name: createOrder
+        intent: luckin.internal.create_order
+        write: true
+        expose: false
+        require_confirm: true
+        forward_owner: false
+        required_scopes: [merchant.write]
+        idempotency_mode: local_at_most_once
+        retry_policy: never
+        timeout_outcome: uncertain
+        idempotency_key_arg: ""
+        compensate_policy: tool
+        compensate_tool: cancelOrder
+        pay_url_locator: data.payOrderQrCodeUrl
+        amount_locator: data.discountPrice
+        amount_unit: yuan
+        success_predicate: {success: [true], code: [0]}
+        schema_sha: "6e7211974147"
+        confirm_prompt: "确认后将创建瑞幸咖啡未支付订单。"
+        timeout_ms: 20000
+      - name: cancelOrder
+        intent: luckin.internal.cancel_order
+        write: true
+        expose: false
+        require_confirm: true
+        forward_owner: false
+        required_scopes: [merchant.write]
+        idempotency_mode: local_at_most_once
+        retry_policy: never
+        timeout_outcome: uncertain
+        idempotency_key_arg: ""
+        compensate_policy: terminal
+        success_predicate: {success: [true], code: [0]}
+        schema_sha: "095c2b916b52"
+        confirm_prompt: "确认取消这笔瑞幸咖啡订单吗？"
+        timeout_ms: 20000
+    workflows:
+      - intent: luckin.order
+        handler: luckin
+        required_tools:
+          - queryShopList
+          - searchProductForMcp
+          - queryProductDetailInfo
+          - switchProduct
+          - previewOrder
+          - createOrder
+          - cancelOrder
+        required_scopes: [merchant.read, merchant.write]
+        require_confirm: true
+        expose: true
+        description: 必须先消费 nearby.search 同一公开 POI 的可信门店名和坐标，再选商品规格（杯型/温度或冰量/糖度/奶底）、预览确认并创建未支付订单
+        slots: [item_query, quantity, store_name, store_longitude, store_latitude, size, temperature, ice, sweetness, milk, checkout_token]
+        candidate_slot: item_query
+        slot_shapes: {item_query: item_name}   # C3 值形状，理由见 mcd.order 那处
+        # 规格槽的值域契约（B6 §4 `input_schema` 的首个消费方，2026-08-21 Q12 规格维）。
+        # **值域的权威仍然是商家**：下单前逐项过官方 productAttrs 的 canSelected，
+        # 这里声明的只有「这个槽对应哪个官方规格组」与「用户说法怎么翻译成官方项名」。
+        #
+        # ⚠ 组名**不许靠常见叫法猜**——2026-08-21 真机取证：此前写死在 luckin.py 的
+        # `_SPEC_GROUPS` 里，`ice→{冰量,冰度,加冰}` 和 `milk→{奶底,奶类,乳基底,奶制品}`
+        # 在瑞幸**一个都不存在**（冰档位是「温度」组的取值；奶的真名是 奶基/奶/奶油），
+        # `sweetness` 还漏了美式族用的「糖」。于是这三个槽声明齐全、planner 也填对了，
+        # 用户仍然被答「这款饮品不支持"少冰"」，而 HMI 上明明画着一个「少冰」的 chip。
+        # 组名与项名逐条比对真机台账 `knowledge/merchant_specs_observed.yaml`
+        # （门禁 `tests/test_merchant_spec_contract.py`）。
+        input_schema:
+          size:
+            kind: merchant_spec
+            groups: [杯型]
+          temperature:
+            kind: merchant_spec
+            groups: [温度]
+            aliases:
+              冰: [冰的, 冰镇, 冷的, 凉的]
+              热: [热的, 热饮]
+          # `ice` 与 `temperature` **刻意同组**：瑞幸没有独立的冰量组，冰/少冰/去冰/热
+          # 是同一个「温度」组的四个取值。同组多槽时 `precedence` 大的赢——真栈实测
+          # 「来一杯冰美式去冰」planner 产的就是 `temperature=冰` + `ice=去冰`，
+          # 用户的意思显然是去冰。让位的那一维打日志，不静默（同 person-pickup 批
+          # 「别名让位要留痕」）。
+          ice:
+            kind: merchant_spec
+            groups: [温度]
+            precedence: 1
+            aliases:
+              少冰: [少点冰, 少一点冰, 少放冰]
+              去冰: [不要冰, 不加冰, 免冰, 无冰, 零冰]
+          sweetness:
+            kind: merchant_spec
+            groups: [糖度, 糖]
+            # 别名只写**语义等价、无争议**的那些。「半糖/三分糖/五分糖」刻意不写——
+            # 瑞幸的档位是 标准甜/少甜/少少甜/微甜/不另外加糖，把「半糖」映射到其中
+            # 任何一档都是**替用户改了他说的话**。匹配不上就诚实拒绝并列出可选项。
+            aliases:
+              不另外加糖: [不加糖, 无糖, 不要糖, 免糖, 零糖, 0糖]
+              少甜: [少糖]
+              少少甜: [少少糖]
+              微甜: [微糖]
+              标准甜: [标准糖, 正常糖, 全糖]
+          # 只含「奶」族，**不含「奶油」**：奶油组（无奶油/加奶油）与奶底是两件事，
+          # 把「不要奶」翻成「无奶油」是换了一个维度。奶油目前没有槽=还没有消费方。
+          # ⚠ 首版这里还顺手写了个「奶底」——**门禁第一次跑就把它抓了出来**
+          # （真机台账里没有这个组名）。留痕：写这条规矩的人，正是被它抓到的第一个。
+          milk:
+            kind: merchant_spec
+            groups: [奶基, 奶]
+            aliases:
+              无奶: [不要奶, 去奶, 不加奶]
+        examples: ["先查附近的瑞幸，再点一杯生椰拿铁少冰半糖", "先找到瑞幸迪美店，再来两杯热美式",
+                   "在瑞幸点一杯超大杯生椰拿铁，去冰不加糖"]
+      # 只读看菜单（2026-08-13）：在此之前「这家店的菜单」在整个能力目录里只对应
+      # 演示商户的 shop.menu，于是真实门店的问句答出了演示数据（trace 9899486a8773d577）。
+      # 门店可信链与下单完全一致——官方菜单必须绑定 deptId，绕不开选店这一步。
+      - intent: luckin.menu
+        handler: luckin
+        required_tools:
+          - queryShopList
+          - searchProductForMcp
+        required_scopes: [merchant.read]
+        require_confirm: false
+        expose: true
+        description: 查看某家瑞幸门店在售的商品与价格（只读，不下单）；同样需要先由 nearby.search 选定门店
+        slots: [store_name, store_longitude, store_latitude, item_query]
+        candidate_slot: item_query
+        slot_shapes: {item_query: item_name}   # C3 值形状，理由见 mcd.order 那处
+        examples: ["这家瑞幸有什么可以点的", "看看这家瑞幸的菜单", "瑞幸有哪些美式"]
+      - intent: luckin.order_cancel
+        handler: luckin
+        required_tools: [queryOrderDetailInfo, cancelOrder]
+        required_scopes: [merchant.read, merchant.write]
+        require_confirm: true
+        expose: true
+        description: 二次确认后取消瑞幸咖啡订单
+        slots: [order_id]
+        examples: ["取消刚才的瑞幸订单", "瑞幸那杯不要了"]

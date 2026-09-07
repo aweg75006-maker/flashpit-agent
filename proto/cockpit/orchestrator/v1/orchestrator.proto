@@ -1,0 +1,80 @@
+syntax = "proto3";
+
+package cockpit.orchestrator.v1;
+
+import "google/protobuf/struct.proto";
+import "cockpit/common/v1/common.proto";
+
+// 云端 Planner 对 Cloud Gateway 暴露的入口。流式返回话术/动作/终态。
+service CloudPlanner {
+  rpc Handle (HandleRequest) returns (stream HandleEvent);
+}
+
+// 端侧编排器对 Edge Gateway 暴露的入口。快意图本地秒回，慢意图转发云端。
+// 复用 HandleRequest/HandleEvent，保证端云链路同构。
+service EdgeOrchestrator {
+  rpc Handle (HandleRequest) returns (stream HandleEvent);
+}
+
+message HandleRequest {
+  string request_id = 1;
+  string session_id = 2;
+  string text = 3;                  // 用户话术（已 ASR）
+  cockpit.common.v1.ContextRef context = 4;
+  repeated cockpit.common.v1.ModalityRef modalities = 5;
+  map<string, string> meta = 6;
+  bool is_confirmation = 7;         // 是否为多轮确认/补槽回复
+  // Runner 签发的短时记忆抽取能力。仅 signed E2E 链路可携带；它不是业务
+  // session，也不得塞入 meta 或下发 Agent。
+  string e2e_memory_capability = 8;
+  // 本轮确认/取消**指向哪一个挂起操作**（QA 卡 Q1-B）。由 FinalResult 下发、
+  // HMI 原样回传。空 = 语音兜底/旧客户端，编排按「最近一条挂起」寻址；
+  // 非空但对不上任何挂起 = 诚实拒绝，**绝不静默打给当前挂起**
+  // （I-013：全局确认命中旧请求）。它不是授权凭据，只是寻址键。
+  string operation_id = 9;
+}
+
+message HandleEvent {
+  oneof event {
+    string speech_delta = 1;        // 流式话术增量
+    cockpit.common.v1.AgentAction action = 2;
+    FinalResult final = 3;
+    ProcessUpdate progress = 4;     // 复杂任务过程区：脱敏进度（步骤+思考摘要），非 final
+  }
+}
+
+// 复杂任务「过程区」增量。仅复杂任务（is_complex）发；普通车控/闲聊不发。
+// 内容由编排层按步骤语义/结果合成，**绝不**携带 prompt / 模型 raw reasoning / 内部参数。
+message ProcessUpdate {
+  string phase = 1;     // analyze | execute | synthesize
+  string label = 2;     // 步骤标签（脱敏短语，如「规划路线」）
+  string summary = 3;   // 思考摘要（后端按步骤结果合成，脱敏，如「3 个景点 + 1 个充电站」）
+  string status = 4;    // start | done
+  string step_id = 5;
+  bool   driving = 6;   // 由 Edge 按 VAL 实时车速/档位标注，供 HMI 行车/泊车双态门控
+}
+
+message FinalResult {
+  string speech = 1;
+  google.protobuf.Struct ui_card = 2;
+  repeated cockpit.common.v1.AgentAction actions = 3;
+  string follow_up = 4;
+  bool need_confirm = 5;
+  // M2 记忆图谱 P2（子 RFC §2.3）：**会话级**情绪信号，供 HMI 选 TTS 情感参数。
+  // 刻意不进记忆层——短 TTL + 不入画像的东西是会话态不是记忆；而 M1b 已就绪的
+  // 情感 TTS 参数面缺的正是「当前这轮」的情绪。空串 = neutral（fail-open）。
+  string emotion = 6;   // neutral | happy | tired | urgent | frustrated
+  // 本条 final 挂起的操作 id（QA 卡 Q1-B）。仅 need_confirm/待补槽时非空。
+  // HMI 把它挂在确认条上，用户点确认/取消时原样回传——多条挂起并存
+  // （Q1-C 小容量挂起表）时，这是唯一能把「这一下」定位到某条挂起的东西。
+  string operation_id = 7;
+  // 本轮**关掉**了哪几条挂起（完成/取消/LRU 淘汰）。HMI 据此撤掉对应确认条。
+  // 由服务端权威给出：HMI 自己猜「这一轮是不是把某条挂起消费掉了」必然猜错，
+  // 而猜错的后果是一条已经作废的确认条继续挂在屏幕上等人点（I-017 同族）。
+  repeated string closed_operation_ids = 8;
+  // B5 缺陷 C：终态也标行车态（与 ProcessUpdate.driving 同一裁决点 server.py::_is_driving）。
+  // process 帧只有复杂轮才有，简单轮从不带标 ⇒ 客户端「Edge 标 false 起 30s 退出」那条 false
+  // 可能永远不到（B4 真机实测行车档 3h12m 退不出）。final 每轮都有，所以也标；Edge 在
+  // Handle 出口盖，云端填的值无权威。缺省 false = 泊车。
+  bool driving = 9;
+}

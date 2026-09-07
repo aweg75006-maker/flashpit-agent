@@ -1,0 +1,79 @@
+name: conditional-reminder
+type: guide
+description: 查询结果决定后续动作的条件句（如果/要是…就…，如下雨就提醒带伞、降温就提醒加衣）只规划查询步并标 adaptive；顺承并列（查完然后提醒）两步都要
+priority: 65
+capability_dependencies: [info.weather, reminder.create]
+# 「然后提醒 / 别提醒」是 2026-08-03 补的：这条知识的职责是判「提醒该不该做」，
+# 而它此前只被条件句形态的词检回。顺承句与否定句检不回它，等于把三分判据里的两分
+# 关在门外——nq.umbrella.both 的漏步正发生在检回了却按条件句读的那一档。
+# 「第二轮」是 2026-08-04 补的（cp.adaptive.rain-umbrella：首轮 adaptive 判对了，
+# 再规划轮却把查询步又排了一遍）。⚠ 补它的时候踩了一次预算坑：知识写到 1504 字符后
+# **整条被 SKILL_BUDGET 挤出注入**（`ki.conditional-reminder.hit` 当场红），
+# 补完必须回头量一次注入块长度——**加知识和加 policy 一样会挤掉知识**。
+keywords: [如果, 要是, 的话, 就提醒, 下雨就, 提醒我带, 然后提醒, 别提醒]
+knowledge: |
+  先判定「提醒到底做不做」。**判据是句子里有没有条件词/否定词，不是提醒有没有说时间**：
+  - **条件依赖**（『如果/要是/万一/…的话/要下就』）：提醒做不做取决于查询结果。
+  - **否定或推迟**（『别/不要/先别/不用/取消』）：那件事**不做**，只规划留下来的那件。
+  - **顺承并列**（『然后/接着/再/顺便/另外』连接，既没有条件词也没有否定词）：
+    两件事都要做，reminder.create 与查询是两个独立步骤，不能把提醒吞掉。
+
+  ⚠ **提醒没说时间，仍然是顺承并列**（『查下天气，然后提醒我带伞』）。把「没说时间」
+  当成条件句的证据是这条知识最容易被读错的地方——代价是用户说了两件事只做成一件。
+  时间缺失由提醒域自己追问，不归规划判。
+
+  **条件依赖**必须选 adaptive：先只规划查询步，看到结果再决定是否执行 Y；不要把 Y
+  无条件排进计划，也不要只查不管 Y。
+
+  **第二轮按最近观察兑现**。例：目标是『有降水就提醒收衣物』，最近观察为
+  `status=ok, intent=info.weather`，且 `data` 中 `condition=阵雨`，条件已成立：必须 `done=false`
+  且只出 reminder.create；不得再出 info.weather，也不得直接结束。只有观察明确无雨才
+  `done=true`。两种结果都不要重排已经完成的查询步。
+
+  **时间槽只写用户自己说出口的**：`time_text` 取提醒那半句的原话字面。另一半句里的
+  『明天/后天』是**查询**的日期限定词，不属于提醒；能力描述与范例里的『明天早上八点』
+  是**格式示范不是默认值**。用户没说时间就留空。
+
+  顺承示例——『看下今天空气质量，然后提醒我出门戴口罩』：
+  同一份 simple 计划中选空气质量查询与提醒创建两个独立能力；提醒标题为「出门戴口罩」，
+  因用户没说时间，time_text 留空。
+few_shots:
+  # 首轮结构必须可模仿：只查条件前件，后件留给 observation replan。
+  - user: 先看看今晚会不会降温，若降温就叫我加件衣服
+    plan: {"complexity":"adaptive","steps":[{"id":"s1","agent_id":"info","intent":"info.weather","slots":{"date":"今晚"},"depends_on":[],"slot_refs":{}}]}
+golden:
+  # expect_not 是这条知识的另一半：条件句首轮绝不能把提醒无条件排进计划；
+  # expect_complexity 是核心主张本身——条件依赖必须 adaptive（看结果再决定）
+  # 天气族容忍（同 multi-day 先例）：本知识的主张是「只出查询步+adaptive」，
+  # weather/forecast 族内怎么选归 mode_routing 管——严格钉 weather 会把族内方差
+  # 记成知识功劳（2026-07-27 消融车道实测）
+  - text: 查下明天会不会下雨，要是下雨就提醒我带伞
+    expect_intents: ["info.weather|info.forecast"]
+    expect_not: [reminder.create]
+    expect_complexity: adaptive
+  # holdout：避开 knowledge 原句与全部 keywords 字面（测泛化不测自证）
+  - text: 看下明晚会不会下雨，要下就叫我收衣服
+    expect_intents: ["info.weather|info.forecast"]
+    expect_not: [reminder.create]
+    expect_complexity: adaptive
+    holdout: true
+  # M-A A1-3 真栈反例：明确八点的提醒不依赖天气，『再看下』是并列连接词。
+  - text: 明天早上八点提醒我带伞，再看下明天深圳会不会下雨
+    expect_intents: [reminder.create, "info.weather|info.forecast"]
+  # ── 2026-08-03 补：顺承并列且**提醒没说时间** ──────────────────────────
+  # 立卡来源 nq.umbrella.both（对抗语料 stable）：两趟独立 live 各 3/3 只出 info.weather，
+  # 而检索名单在通过的那次与失败的两次里逐字相同——不是检不回，是检回了按条件句读了。
+  # 旧知识把并列的判据写成「提醒本身已经有**明确时间**」，于是「没说时间」被当成条件句
+  # 的证据，提醒被整个吞掉。
+  - text: 查下今晚的天气，然后提醒我出门穿厚一点
+    expect_intents: ["info.weather|info.forecast", reminder.create]
+  - text: 瞧一眼明早冷不冷，回头叫我多穿件外套
+    expect_intents: ["info.weather|info.forecast", reminder.create]
+    holdout: true
+  # 三分判据的第三分：否定不能被新加的「顺承并列」规则顺手翻正。
+  # 没有这条，"修好漏步"会以"该不做的也做了"的形式还回去。
+  - text: 看下明早的空气质量，别提醒我戴口罩了
+    expect_intents: ["info.air_quality|info.weather"]
+    expect_not: [reminder.create]
+owner: orchestrator
+version: 5

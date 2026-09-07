@@ -1,0 +1,137 @@
+syntax = "proto3";
+
+package cockpit.agent.v1;
+
+import "google/protobuf/struct.proto";
+import "cockpit/common/v1/common.proto";
+
+// 所有 Agent（core/ecosystem，端/云）必须实现的统一契约。即插即用的前提。
+service Agent {
+  rpc Describe      (DescribeRequest) returns (AgentManifest);          // 上报能力清单
+  rpc Execute       (ExecuteRequest)  returns (ExecuteResponse);        // 同步执行
+  rpc ExecuteStream (ExecuteRequest)  returns (stream ExecuteEvent);    // 流式执行（长任务/流式话术）
+  rpc Health        (HealthRequest)   returns (HealthResponse);
+}
+
+message DescribeRequest {}
+
+// 能力声明（运行时版本，对应 manifest.yaml）
+message AgentManifest {
+  string agent_id = 1;
+  string version = 2;
+  string display_name = 3;
+  string category = 4;              // core | ecosystem
+  string trust_level = 5;           // system | first_party | third_party
+  string deployment = 6;            // edge | cloud
+  uint32 latency_budget_ms = 7;
+  string fallback = 8;              // 失败/拒绝降级到的 agent_id
+  repeated Capability capabilities = 9;
+  repeated string requires_permissions = 10;
+  repeated string edge_intents = 11; // 端侧本地意图白名单（供 Fast Intent）
+  string kind = 12;                 // agent（默认）| tool | edge_fast：调度语义/治理，区别于 deployment（传输）
+  repeated string context_scopes = 13; // Agent 声明需要的敏感上下文片段（如 location | vehicle_state）；编排按此最小化下发
+  repeated RouteHint route_hints = 14; // 确定性路由提示：弱 LLM 漏/误路由时编排核心通用 RouteHintEngine 据此兜底（R2.1，领域路由知识由 Agent 声明而非编排核心硬编码）
+}
+
+message Capability {
+  string intent = 1;
+  string description = 2;
+  repeated string slots = 3;
+  repeated string examples = 4;     // 供语义路由的示例话术
+  bool require_confirm = 5;
+  bool heavy = 6;                   // 重域能力：命中即开思考+过程区（progress.HEAVY_INTENTS 机制化，R2.1）
+  Verification verification = 7;    // 执行后对账期望（M2 Outcome Verifier）：领域期望由 Agent 声明，中央只跑通用求值器
+  // 槽位值形状契约（C3，MiniMax QA 修复批第 3 批）：`槽位名 -> 形状名`。
+  // wait_slot 续接时编排通用消费——「这句话长得像不像这个槽的值」，长得不像即判换话题。
+  // 形状**只有名字在这里**，判据本体是编排侧 `orchestrator/cloud/slot_shape.py` 的唯一实现
+  // （零领域词）；同 `verification` 的分工：领域声明在 Agent，通用求值器在中央。
+  map<string, string> slot_shapes = 8;
+  // **整句型能力**（QA 余项，2026-08-29）：这个 capability 消费的是**整句原话**，
+  // 一次把这句话里的事全办完（如 reminder.create_batch 一步建完同一事项的两个时刻）。
+  // 编排据此保证**同一份计划里最多一步**——多的那些做的是同一件事。
+  // 真栈实录（长会话 `e15ac1e` family SL1）：planner 给同一句话排了两个
+  // `reminder.create_batch` 步（span 里两个 `step.agent:reminder`），每步都把整组
+  // 建了一遍 ⇒ **4 张 reminder_card、4 个不同 id**，随后按标题取消当场撞歧义，
+  // 这组提醒既清不掉又一直占着序数参照系。执行器的副作用防抖挡不住它：
+  // 指纹是 `(intent, 归一化 slots)`，而 planner 给两步发明了不同的槽名
+  // （9 次取样里出现过 7 种），**指纹不同、防抖不命中**——而这个 Agent
+  // 根本不读槽、读的是 raw_text。声明式解决：谁消费整句谁自己说出来。
+  bool whole_utterance = 9;
+  // 只允许直接回答：manifest 是唯一权威，planner wire 无权设置。
+  bool response_only = 10;
+}
+
+// 执行后对账声明（M2 Outcome Verifier）：解「步骤 OK ≠ 结果达成」——
+// 车控步 VAL 层可能没生效、查询步可能拿了空数据，两者今天都以 OK 落地。
+// **声明式是铁律**：领域期望全部写在这里，中央 `_verify_outcome` 与求值器不得出现任何
+// agent_id/intent 字面量分支——否则会长成下一个 fast_intent.py（v1.2 评审既定，
+// 与 route_hints 把领域路由知识搬回 Agent 是同一条哲学）。
+message Verification {
+  string mode = 1;         // none(缺省，不验) | schema(查询步拿到真东西) | state_match(车控步世界真的变了)
+  uint32 timeout_ms = 2;   // state_match 等待状态收敛的上限（缺省 2000）
+  string on_fail = 3;      // report(缺省，诚实告知) | retry(重执行，仅对无副作用步开放)
+  uint32 max_attempts = 4; // retry 次数上限（缺省 1）
+  google.protobuf.Struct expect = 5;  // 按 mode 的期望：schema={data_keys:[...]}；state_match={mirror:"vehicle_state", keys:{k:v}}
+}
+
+// 确定性路由提示（R2.1）：Agent 声明「命中 pattern 即路由到本 Agent 的 intent」，
+// 编排核心 RouteHintEngine 通用消费——把领域路由正则/兜底从 planning.py 搬回 Agent，
+// 恢复「新增 Agent 不改编排核心」铁律。语义等价于原 planning._ensure_* 系列。
+message RouteHint {
+  string pattern = 1;               // 触发正则（Python re 语法）
+  string intent = 2;                // 命中后路由到的本 Agent intent
+  string policy = 3;                // replace=取代误规划整条计划 | append=并列补步（默认 replace）
+  int32 priority = 4;               // 冲突时高优先先判（降序）
+  string guard = 5;                 // 可选反例守卫正则：命中 guard 则本 hint 不生效
+  map<string, string> slots = 6;    // 槽位模板：值为 $text=原话 / $1.. =捕获组 / 其余字面量原样
+  // 匹配范围（C6-A，MiniMax QA 修复批第 4 批）：""|"utterance"=整句（缺省，行为不变）；
+  // "clause"=**逐分句**匹配（分句表 `runtime/clause_split.py`）。
+  // 为什么要这一维：接送 hint 原本只锚两种整句形态，「接爸妈**去吃饭**」「接孩子**后去
+  // 万象城**」这类「接X + 任意后续」全部不命中，接人那一半就只能靠 LLM——长上下文里
+  // 它会被旧焦点带跑（真栈 T47/T53/T55）。分句级锚定让**每个诉求各自被看见一次**，
+  // 剩下那半仍交给正常规划。clause 档的 `$text` 解析成**命中的那一分句**，不是整句；
+  // append 的去重也按「这一步是不是已经带着本 hint 要填的值」判，不是只看 intent 在不在。
+  string scope = 7;
+}
+
+message ExecuteRequest {
+  string request_id = 1;
+  string session_id = 2;
+  cockpit.common.v1.Intent intent = 3;
+  cockpit.common.v1.ContextRef context = 4;
+  repeated cockpit.common.v1.ModalityRef modalities = 5;
+  map<string, string> meta = 6;     // trace_id, locale, vehicle_id ...
+}
+
+message ExecuteResponse {
+  enum Status {
+    OK = 0;
+    NEED_CONFIRM = 1;               // 需用户二次确认
+    NEED_SLOT = 2;                  // 缺槽位，需追问
+    FAILED = 3;
+    REJECTED = 4;                   // 权限/安全拒绝
+  }
+  Status status = 1;
+  string speech = 2;                // 给 TTS 的播报话术
+  google.protobuf.Struct ui_card = 3; // 给 HMI 的结构化卡片（可选）
+  repeated cockpit.common.v1.AgentAction actions = 4;
+  string follow_up = 5;             // 追问/澄清提示
+  cockpit.common.v1.ErrorInfo error = 6;
+  google.protobuf.Struct data = 7;  // 结构化结果（供编排 slot_refs 取值，不面向 HMI）
+  repeated string missing_slots = 8; // NEED_SLOT 时声明缺失的槽位名（F12）
+}
+
+// 流式：边想边说边做
+message ExecuteEvent {
+  oneof event {
+    string speech_delta = 1;        // 流式话术增量
+    cockpit.common.v1.AgentAction action = 2;
+    ExecuteResponse final = 3;      // 终态
+  }
+}
+
+message HealthRequest {}
+message HealthResponse {
+  enum Serving { UNKNOWN = 0; SERVING = 1; NOT_SERVING = 2; }
+  Serving status = 1;
+}

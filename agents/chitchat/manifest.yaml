@@ -1,0 +1,34 @@
+agent_id: chitchat
+version: 0.1.0
+display_name: 闲聊
+category: ecosystem
+trust_level: first_party
+deployment: cloud
+latency_budget_ms: 2500
+fallback: ""
+
+capabilities:
+  - intent: chitchat.talk
+    response_only: true
+    description: 开放域闲聊、情绪陪伴、创作，以及**不随时间变化**的常识/原理/定义/历史知识
+      （其他 Agent 无法处理时的兜底）。不适用：实时或近期信息（新闻、价格、比分、近期事件）
+      ——那些答案会随时间变化，必须走联网检索类能力，不要用本能力直答。
+      知识/解释/科普类问题请带 depth=deep（用更强模型），寒暄/情绪不传
+    slots: [depth]
+    examples: ["讲个笑话", "陪我聊聊", "你叫什么名字", "好无聊啊",
+               "地球为什么是圆的", "给我讲讲光合作用", "三国演义的作者是谁"]
+
+requires_permissions: []
+edge_intents: []
+
+# 钟点/日期/星期问句确定性路由（badcase 2026-07-15：「现在几点了」被 planner 误路由到
+# info.search——联网检索答不了墙钟只能诚实降级；chitchat 侧 _clock_answer 按系统墙钟
+# 零 LLM 直答，路由钉住后该问句家族全链路确定性）。pattern 占据整句（^$ 锚定 + 礼貌
+# 前缀 + ≤2 个语气尾词），防劫持「几点提醒我」「明天几点有比赛」等含时间词的其他意图。
+# priority=61：高于 info search/news=59（保证先于宽泛搜索动词类评估），无同级撞车。
+route_hints:
+  - pattern: '^(?:请问|问一下|问下)?(?:(?:现在|当前)?(?:是)?几点(?:钟)?|(?:现在|当前)(?:的)?(?:是)?(?:什么)?时间(?:是多少|是几点)?|今天(?:是)?(?:几号|多少号|几月几号|几月几日|什么日期|星期几|周几|礼拜几))[呀啊呢哦吧了嘛么]{0,2}[？?。！!]?$'
+    intent: chitchat.talk
+    policy: replace
+    priority: 61
+    slots: {}
