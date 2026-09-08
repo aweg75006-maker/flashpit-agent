@@ -27,10 +27,10 @@
 | I1 | 端侧小模型 + 端云协同推理 | 端侧从"规则匹配"升级为"模型推理"，断网可用、毫秒级响应 | P0 | 3 周 | 中 |
 | I2 | 车辆数字孪生层 | VAL 从"返回成功"升级为"可验证仿真"，状态真实变化、场景可回放 | P0 | 2 周 | 低 |
 | I3 | 决策可解释层 | 从"技术可观测"升级为"用户可解释"，每个动作回答"为什么" | P1 | 2 周 | 中 |
-| I4 | 多 Agent 去中心化协作 | 从"Planner 中心化调度"探索"Agent 直连协商 + 交叉验证" | P2 | 4 周 | 高 |
+| I4 | 多 Agent 去中心化协作 | 从"Planner 中心化调度"到"直连协商制度化 + 条件性交叉验证" | P2 | 1.5-2 周（拆 I4-a/b；另有 S1 安全债 0.5 周） | 中高 |
 | I5 | 车载多模态提示注入防御 | 从"权限校验"扩展到"环境声音对抗"，声源定位 + 置信度门控 | P2 | 3 周 | 高 |
 
-**实施策略**：P0 两个方向（I1 + I2）并行启动，二者无依赖且都是"接口重构 + 渐进替换"模式，1-2 周可出第一个 demo。P1/P2 在 P0 稳定后再启动。
+**实施策略**：P0 两个方向（I1 + I2）并行启动，二者无依赖且都是"接口重构 + 渐进替换"模式，1-2 周可出第一个 demo。P1/P2 在 P0 稳定后再启动；**唯一例外是 I4 的 S1（直连安全债）——0.5 周、无依赖、修的是现存隐患，可随时插入**（见 §6.5）。
 
 ---
 
@@ -432,87 +432,108 @@ if user_ask == "为什么":
 
 ## 6. 方向 I4：多 Agent 去中心化协作
 
-### 6.1 现状缺口
+> **状态**：草案 v2.0（2026-09-08 复核修订）
+> **修订原因**：v1.0 的缺口判断与收益论证经代码复核后不成立——Agent 直连、DAG 并行、NATS、
+> 黑板与账本均已落地，"绕开 Planner 中转"不是未做的事；"端到端延迟降低 ≥30%"把杠杆点认错。
+> 本版重写缺口、难点、落地路径与验收标准。
 
-当前是 Planner 中心化编排：Planner 决定调哪个 Agent、按什么顺序、结果怎么聚合。Agent 之间不直接通信，所有中间结果都经过 Planner 中转。
+### 6.1 现状复核：缺口被高估了
 
-问题：
-- 跨域任务延迟高（每个 Agent 调用都经过 Planner 序列化）
-- Planner 成为单点瓶颈和单点故障
-- Agent 无法利用其他 Agent 的中间结果做并行优化
+v1.0 判断"Agent 之间不直接通信，所有中间结果都经过 Planner 中转"。复核后：**前半句不成立，
+后半句的成本被高估**。
 
-### 6.2 创新点
+| 能力 | v1.0 判断 | 2026-09-08 复核 | 证据 |
+|---|---|---|---|
+| Agent 直连调用 | 缺 | **已实现**：gRPC + Registry 动态发现，护栏齐全 | `agents/_sdk/agent_client.py:84`；`MAX_DEPTH=2`(46)、环检测(107)、超时、endpoint 三级解析(190) |
+| 直连真实用例 | 无 | **已在跑**：`road_safety` 并行调 `info.weather`/`info.forecast`/`navigation.search_poi`；`reminder` 调 `nearby` | `agents/road_safety/src/agent.py:249-252`、`agents/reminder/src/agent.py:634` |
+| 并行执行 | 缺 | **已实现**：DAG 分层，层内 `asyncio.gather` | `orchestrator/cloud/executor.py:160-161` |
+| NATS | 待引入 | **已部署**（`nats:2-alpine` + JetStream），但只跑广播类主题 | `deploy/docker-compose.yaml:83-92`；现用主题为 `vehicle.state.changed`/`agent.proactive.*`/`obs.*`/`payment_result` |
+| 共享黑板 | 无 | **已有**：`shared_state`，带权威 key 登记表（owner/reader/schema/TTL） | `agents/_sdk/shared_state.py:1-21` |
+| 跨 Agent 账本 | 无 | **已有**：`TaskLedger`，PG 存储，deep_research 与 mcp_bridge 共用 | `agents/_sdk/ledger.py` |
+| 冲突仲裁算子 | 无 | **已有但非 Agent 级**：域名权威分档、时效优先重排 | `agents/_sdk/source_quality.py:93-117`、`grounding.py:285-291` |
+| 交叉验证 / 共识 | 缺 | **确实为零**：全仓库仅 plan.md 自身出现 `cross_validate`/`consensus` | — |
 
-引入**混合协作模式**：Planner 负责任务分解和最终仲裁，Agent 之间通过 NATS 直接交换中间结果，高风险决策触发多 Agent 交叉验证。
+**v1.0 说对的只有一条**：Agent 之间没有任务级协商与结果交叉验证。真实缺口只有两个——
+**① 任务级协商通道；② Agent 级仲裁器**。其余都属于"把已跑通的模式制度化"。
 
-```
-Planner（分解+仲裁）
-    │
-    ├── 发布任务："接女儿放学顺路买咖啡"
-    │
-    ├── navigation-agent ←──→ nearby-agent  （直接交换：咖啡店经纬度 → ETA 计算）
-    ├── reminder-agent                      （独立：创建放学提醒）
-    │
-    └── 收集结果 → 交叉验证 → 最终计划
-```
+### 6.2 收益论证修正：延迟的杠杆不在中转
 
-### 6.3 技术方案
+v1.0 把延迟归因于"每个 Agent 调用都经过 Planner 序列化"。复核后不成立：
 
-#### 6.3.1 Agent 间通信协议（基于 NATS）
+- `slot_refs` 是**进程内 dict 传递**（解析见 `executor.py:564`），不是网络往返，成本 <1ms；
+- 同层已并行，跨层串行由**数据依赖**决定，去中心化消不掉；
+- 端到端延迟的大头是 **LLM 规划**与**外部 API**（地图/天气/检索）。
 
-```python
-# agents/_sdk/agent_comm.py
-class AgentComm:
-    """Agent 间直接通信通道，基于 NATS request/reply"""
+真正的杠杆是 **replan 轮次**：`loop.py:33-36` 给出 `simple=(2 次, 8s)` / `adaptive=(3 次, 12s)`，
+每一轮 replan 都是一次完整 LLM 调用。Agent 若能自补子信息、少回一次 Planner，才拿得到 30%。
 
-    async def request_peer(self, target_agent: str, action: str, payload: dict) -> dict:
-        """向指定 Agent 发送请求，等待回复（超时 3s）"""
-        subject = f"agent.{target_agent}.comm"
-        msg = await self.nc.request(subject, json.dumps({
-            "action": action, "payload": payload,
-            "trace_id": get_trace_id(), "from": self.agent_id
-        }).encode(), timeout=3)
-        return json.loads(msg.data)
+> **验收标准相应改为**：adaptive 档**平均 replan 轮次 ≤1.5**（基线待实测）。
+> 端到端延迟仍统计，但只作回归项（增量 ≤10%，对齐 §10 第 3 条），不作为创新点指标。
 
-    async def broadcast_intermediate(self, topic: str, payload: dict):
-        """广播中间结果，感兴趣的 Agent 订阅"""
-        await self.nc.publish(f"agent.intermediate.{topic}", json.dumps(payload).encode())
-```
+### 6.3 创新点重定义
 
-#### 6.3.2 交叉验证机制
+"混合协作模式"方向保留，落地形态收窄为两件**可独立交付**的事：
 
-高风险决策（导航路线、充电规划、支付）触发 2-3 个 Agent 独立计算，结果不一致时 Planner 仲裁：
+- **I4-a 协商下放**（制度化 + 补安全债）：把 `road_safety` 已验证的直连模式提升为 SDK 一等能力，
+  补齐直连路径缺失的安全闸门，再推广到 2-3 个跨域场景。**这是工程规范化，不是架构创新。**
+- **I4-b 交叉验证**（待可行性验证）：高风险决策由 2-3 个 Agent 独立计算，分歧时仲裁。
+  **先测分歧率，再决定做不做**（见 6.5）。
 
-```python
-async def cross_validate(self, task, agents: list[str]) -> ValidationResult:
-    results = await asyncio.gather(*[
-        self.request_peer(a, task.action, task.payload)
-        for a in agents
-    ])
-    if all(r == results[0] for r in results):
-        return ValidationResult(consensus=True, result=results[0])
-    else:
-        return ValidationResult(consensus=False, candidates=results, arbitrator="planner")
-```
+### 6.4 真实难点（v1.0 未覆盖的三项）
 
-### 6.4 技术难点与风险
+v1.0 列的四条难点（死锁/活锁、竞标评价函数、Planner 兼容、可观测）**已被现有护栏兜住或可控**：
+`MAX_DEPTH=2` + 环检测 + `asyncio.wait_for` 已解决终止性；可观测可复用 `agent_client` 已有的
+guardrail span（`agent_client.py:65-80`）。真正难的是下面三项：
 
-| 难点 | 应对 |
+| # | 难点 | 说明 | 应对 |
+|---|---|---|---|
+| N1 | **中心化的重量在校验，不在中转** | `planning.py` 2624 行里 `_validated_steps`(2164)、`_derive_depends_on_from_refs`(2416)、`_side_effect_steps`(2437)、整句坍缩(2340)、slot 保真(657) 全部假设 orchestrator 是唯一真相源。绕开中转容易，给这些守卫重新找落点才是主要工作量 | 守卫**不下放**。Agent 直连只承担取数与计算，计划合法性仍由 Planner 裁定 |
+| N2 | **直连路径缺安全闸门（现存隐患）** | `response_only` 的 fail-closed 只在 `engine.py:839-859`、`loop.py:249-273`，`agents/_sdk` 全文不检查；权限同理——`agent_client.py:9-13` 明确"权限不在此层做，依赖编排层 dispatch"。**今天没出事只是因为直连尚未撞上受保护能力** | **独立安全债**，见 6.5 S1，与 I4 是否实施解耦，建议优先修 |
+| N3 | **权限逃逸** | Agent 若自发发起车控类直连，"谁有权代表用户"这条线是空的；比 v1.0 担心的死锁危险得多 | 直连目标能力必须在 manifest 声明 `peer_callable` 与权限集，**车控能力默认不可被直连**（fail closed） |
+
+> **约束**：改造全部落在 `agents/_sdk`，不改 orchestrator 核心路由分支（CLAUDE.md §3.1 第 4 条）。
+
+### 6.5 落地路径（重排）
+
+#### S1：直连安全债（0.5 周，建议独立于 I4 立即启动）
+
+| 项 | 内容 |
 |---|---|
-| 去中心化后死锁/活锁 | 有界迭代（最多 3 轮协商）+ 超时熔断 + Planner 最终仲裁权 |
-| 竞标机制评价函数 | 第一阶段不做竞标，只做"指定 Agent 直连"；竞标留到 Phase 3 |
-| 与现有 Planner 的兼容 | 混合模式：Planner 仍负责任务分解，只是 Agent 间中间结果不经过 Planner |
-| 可观测性复杂度 | Agent 间通信走 NATS，collector 新增 `agent.comm` subject 订阅，全链路 trace 不断 |
+| 改动 | 在 `agents/_sdk/server.py` 入口对 `response_only` 做 fail closed（语义对齐 `executor._enforce_response_only`）；`AgentClient` 拒绝调用未声明 `peer_callable` 的能力 |
+| 验收 | 契约测试：直连调 `response_only` 能力必须失败；未声明 `peer_callable` 的直连被拒并发 guardrail span |
+| 价值 | 消除 CLAUDE.md §3.1 第 7 条在直连路径上的覆盖缺口 |
 
-### 6.5 落地路径
+#### I4-a：协商下放（1.5 周，低风险）
 
 | 阶段 | 内容 | 产出 | 验收 |
 |---|---|---|---|
-| M1（第1-2周） | `AgentComm` SDK + NATS 通信通道 + 1 个跨域场景（导航+周边）直连 | Agent 间可直接通信 | "顺路买咖啡"场景 ETA 计算不经过 Planner 中转 |
-| M2（第2-3周） | 交叉验证框架 + 充电规划场景（navigation + charging-planner + trip-planner） | 高风险决策三方验证 | 三方结果不一致时 Planner 仲裁，结果可追溯 |
-| M3（第4周） | 性能基准 + 去中心化比例调优 + 文档 | 完整混合协作模式 | 跨域任务端到端延迟降低 ≥ 30% |
+| A1（0.5 周） | SDK 规范化：直连请求携带 `trace_id`/`call_depth`/权限声明；`agent.comm` span 进 collector | 直连可观测、可审计 | Dashboard trace 视图可见完整 agent→agent 调用链，trace 不断 |
+| A2（1 周） | 推广 2-3 个跨域场景（导航+周边、充电规划、行程+提醒），Agent 自补子信息 | 场景级直连 | **adaptive 档平均 replan 轮次 ≤1.5**；现有精简栈全功能无回归 |
 
-> **风险提示**：此方向技术风险最高，容易做成"为了去中心化而去中心化"。建议 P0 方向稳定后再启动，且 M1 完成后评估收益，不明显则暂停。
+#### I4-b：交叉验证（先做 0.5 周可行性验证，通过才继续）
+
+**前置可行性验证（0.5 周，不写生产代码）**：让 `navigation` / `charging_planner` / `trip_planner`
+对同一组充电规划问题各算一遍，统计**三方结果分歧率**及分歧中真正抓到错误的比例。
+
+- 分歧率 **<5%** → 交叉验证是纯成本（多 2 次调用换不到正确性提升），**砍掉 I4-b**；
+- 分歧率 **>15% 且分歧确实抓到错误** → 继续 B1/B2；
+- 中间地带 → 仅对支付/车控等高危域的单一能力启用，不做通用框架。
+
+| 阶段 | 内容 | 验收 |
+|---|---|---|
+| B1（1 周） | 声明式交叉验证：manifest 声明 `cross_verify: [agent_ids]`，仲裁复用 `source_quality` 权威/时效算子 | 分歧可追溯，仲裁结果进 decision log（与 I3 打通） |
+| B2（1 周） | 有界协商：最多 3 轮 + 超时熔断 + Planner 终裁权 | 无死锁；协商超时率 <1% |
+
+> **风险提示（沿用 v1.0 判断）**：I4-b 技术风险最高，容易做成"为了去中心化而去中心化"。
+> **分歧率是唯一进入判据**，达不到就停在 I4-a。
+
+### 6.6 预期产出
+
+- `agents/_sdk/agent_client.py`：权限声明 + `peer_callable` 门禁 + 完整 trace 透传
+- `agents/_sdk/server.py`：`response_only` 等安全闸门下沉（S1）
+- 2-3 个跨域场景改为 Agent 直连自补子信息
+- （条件性）manifest `cross_verify` 字段 + 仲裁器
+- 可观测台新增 `agent.comm` 视图：直连调用链、深度、耗时、拒绝原因
 
 ---
 
@@ -600,15 +621,19 @@ class InjectionGuard:
   │              │              ├─ I1-M3 路由调优 ─┤
   │              │              ├─ I2-M3 回放故障 ─┤
   │              │              ├─ I3-M2 导航+追问 ┤
-  │              │              │              ├─ I4/I5 启动（评估后）
+  │              │              │              ├─ I4-a/I5 启动（评估后）
   ▼              ▼              ▼              ▼
  P0 接口重构    P0 核心实现    P0 调优验收    P1/P2 启动
 ```
 
+**排期说明**：S1（直连安全债）0.5 周且无依赖，不与 P0 抢资源，可在任意窗口插入，建议尽早；
+I4-a 在 P0 验收后启动；I4-b 必须先通过 0.5 周的分歧率前置验证才进入 B1/B2。
+
 **依赖关系**：
 - I1 和 I2 无依赖，可并行
 - I3 依赖 I2 的状态快照（决策日志可能引用车辆状态）
-- I4 依赖 I1 的分类器（去中心化需要更准的意图理解）
+- I4-a（协商下放）与 S1（直连安全债）不依赖任何 P0 方向，可独立排期；I4-b 依赖 I1 的分类器
+  （交叉验证需要更准的意图理解）
 - I5 独立，可随时启动
 
 ---
@@ -620,7 +645,9 @@ class InjectionGuard:
 | 端侧模型准确率不达标 | I1 退化为规则+上云，创新点弱化 | 中 | 用项目 golden 微调；低置信度兜底上云；可接受 85% 准确率 |
 | 孪生层物理模型与真实偏差大 | I2 只能用于开发测试，不能用于验证 | 低 | 明确标注"仿真参数，非真实车辆数据"；参数可配置 |
 | 决策日志与 LLM 实际推理不符 | I3 解释不可信，用户质疑 | 中 | 确定性 Agent 先做；LLM 用 JSON 结构化输出约束 |
-| 去中心化引入死锁/延迟 | I4 反而降低系统稳定性 | 高 | 有界迭代+超时熔断；M1 后评估收益，不明显则暂停 |
+| 直连路径缺权限 / `response_only` 闸门（2026-09-08 复核新增） | 违反 CLAUDE.md §3.1 第 7 条，Agent 直连可绕过只响应约束 | 中 | S1 独立修复，闸门下沉到 `agents/_sdk`；与 I4 是否实施解耦 |
+| 交叉验证分歧率过低 | I4-b 退化为纯成本（多 2 次调用换不到正确性） | 中 | 0.5 周前置实测三方分歧率，<5% 直接砍掉 I4-b |
+| 去中心化引入死锁/延迟 | I4-b 降低系统稳定性 | 中低 | 有界迭代（≤3 轮）+ 超时熔断 + Planner 终裁权；现有 `MAX_DEPTH=2` 与环检测已兜底终止性 |
 | 注入防御误杀正常指令 | I5 影响用户体验 | 中 | 可疑指令走确认而非直接拦截；持续优化白名单 |
 | 五个方向同时开工导致主线混乱 | 项目不可维护 | 中 | 严格按优先级，P0 完成验收后才启动 P1/P2 |
 
@@ -645,7 +672,7 @@ class InjectionGuard:
 | 端侧智能 | 正则规则匹配 | 端侧小模型推理 + 端云协同路由 |
 | 车控仿真 | VAL 返回成功 mock | 数字孪生层，状态真实变化 + 场景回放 |
 | 可解释性 | 技术 trace（开发者视角） | 决策推理轨迹（用户视角）+ 追问机制 |
-| Agent 协作 | Planner 中心化调度 | 混合模式：Agent 直连协商 + 交叉验证 |
+| Agent 协作 | Planner 中心化调度 | 直连协商制度化（含安全闸门下沉）+ 条件性交叉验证 |
 | 安全 | 权限校验 + 二次确认 | 多模态注入防御 + 声源验证 + 置信度门控 |
 
 完成 P0 两个方向后，项目即具备明确的差异化标签：**"端云协同推理 + 车辆数字孪生的智能座舱 Agent 系统"**。
